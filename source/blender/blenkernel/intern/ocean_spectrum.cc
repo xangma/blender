@@ -51,7 +51,7 @@ static float alpha_beta_spectrum(const float alpha,
                                  const float omega,
                                  const float peakomega)
 {
-  return (alpha * sqrt(gamma) / pow(omega, 5.0)) * exp(-beta * pow(peakomega / omega, 4.0));
+  return (alpha * gamma * gamma / pow(omega, 5.0)) * exp(-beta * pow(peakomega / omega, 4.0));
 }
 
 static float peak_sharpen(const float omega, const float peakomega, const float gamma)
@@ -71,7 +71,7 @@ static float ocean_spectrum_wind_and_damp(const Ocean *oc,
                                           const float val)
 {
   const float k2 = kx * kx + kz * kz;
-  const float k_mag_inv = 1.0f / k2;
+  const float k_mag_inv = 1.0f / sqrt(k2);
   const float k_dot_w = (kx * k_mag_inv * oc->_wx) + (kz * k_mag_inv * oc->_wz);
 
   /* Bias towards wind direction. */
