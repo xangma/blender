@@ -604,6 +604,16 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
     col.prop(ptr, "sharpen_peak_jonswap", ui::ITEM_R_SLIDER, std::nullopt, ICON_NONE);
     col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
+  else if (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP) {
+    col->prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+
+  if (ELEM(spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP)) {
+    col->separator();
+    col->prop(ptr, "realsea_fmin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col->prop(ptr, "realsea_fmax", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col->prop(ptr, "realsea_spread", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
 }
 
 static void bake_panel_draw(const bContext * /*C*/, Panel *panel)

@@ -6741,6 +6741,16 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
        0,
        "Shallow Water",
        "Use for shallow water ('JONSWAP', 'TMA' - Texel-Marsen-Arsloe method)"},
+      {MOD_OCEAN_SPECTRUM_REALSEA_PM,
+       "REALSEA_PM",
+       0,
+       "Realsea (PM)",
+       "Realsea method with Pierson-Moskowitz spectrum and directional spreading"},
+      {MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP,
+       "REALSEA_JONSWAP",
+       0,
+       "Realsea (JONSWAP)",
+       "Realsea method with JONSWAP spectrum and directional spreading"},
       {0, nullptr, 0, nullptr, nullptr},
   };
 
@@ -6948,6 +6958,30 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_range(prop, 0.0, 1.0);
   RNA_def_property_ui_text(prop, "Sharpen Peak", "Peak sharpening for 'JONSWAP' and 'TMA' models");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "realsea_fmin", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "realsea_fmin");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Min Frequency", "Minimum frequency for Realsea spectra (Hz)");
+  RNA_def_property_ui_range(prop, 0.0, 10.0, 0.1, 3);
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "realsea_fmax", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "realsea_fmax");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Max Frequency", "Maximum frequency for Realsea spectra (Hz)");
+  RNA_def_property_ui_range(prop, 0.0, 10.0, 0.1, 3);
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "realsea_spread", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_float_sdna(prop, nullptr, "realsea_dvar");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Directional Spread", "Directional spreading divisor (dvar) for Realsea spectra");
+  RNA_def_property_ui_range(prop, 0.1, 4.0, 0.1, 3);
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "random_seed", PROP_INT, PROP_UNSIGNED);

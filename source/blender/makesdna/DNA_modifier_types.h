@@ -1442,6 +1442,8 @@ enum OceanModifierSpectrum : int {
   MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ = 1,
   MOD_OCEAN_SPECTRUM_JONSWAP = 2,
   MOD_OCEAN_SPECTRUM_TEXEL_MARSEN_ARSLOE = 3,
+  MOD_OCEAN_SPECTRUM_REALSEA_PM = 4,
+  MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP = 5,
 };
 
 enum OceanModifierFlag : char {
@@ -1489,6 +1491,11 @@ struct OceanModifierData {
    */
   float fetch_jonswap = 120.0f;
   float sharpen_peak_jonswap = 0.0f;
+
+  /* Realsea-specific parameters. */
+  float realsea_fmin = 0.05f;
+  float realsea_fmax = 1.0f;
+  float realsea_dvar = 1.0f;
 
   int bakestart = 1;
   int bakeend = 250;

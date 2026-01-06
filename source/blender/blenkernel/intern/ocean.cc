@@ -82,6 +82,72 @@ MINLINE float omega(float k, float depth)
   return sqrtf(GRAVITY * k * tanhf(k * depth));
 }
 
+static float realsea_spread_kernel(const float s, const float dvar, const float theta)
+{
+  if (s <= 0.0f) {
+    return 1.0f;
+  }
+  const float denom = (dvar > 0.0f) ? dvar : 1.0f;
+  float c = cosf(theta / denom);
+  if (c < 0.0f) {
+    c = -c;
+  }
+  if (c <= 0.0f) {
+    return 0.0f;
+  }
+  return expf((2.0f * s) * logf(c));
+}
+
+static float realsea_spread_integral(const float s, const float dvar, const int samples)
+{
+  const float half_pi = float(M_PI) * 0.5f;
+  const float theta_min = -half_pi;
+  const float theta_max = half_pi;
+  const float dtheta = (theta_max - theta_min) / float(samples);
+  float sum = 0.0f;
+
+  for (int i = 0; i < samples; i++) {
+    const float t0 = theta_min + dtheta * float(i);
+    const float t1 = t0 + dtheta;
+    const float v0 = realsea_spread_kernel(s, dvar, t0);
+    const float v1 = realsea_spread_kernel(s, dvar, t1);
+    sum += (v0 + v1) * 0.5f * dtheta;
+  }
+
+  return sum;
+}
+
+static void ocean_realsea_build_spread_lut(Ocean *o)
+{
+  if (o->_realsea_spread_lut) {
+    MEM_freeN(o->_realsea_spread_lut);
+    o->_realsea_spread_lut = nullptr;
+  }
+
+  constexpr int lut_size = 256;
+  constexpr int samples = 180;
+  o->_realsea_lut_size = lut_size;
+
+  o->_realsea_spread_lut = MEM_malloc_arrayN<float>(lut_size, "realsea spread lut");
+  const float s_max = std::max(o->_realsea_sp, 0.0f);
+  o->_realsea_s_max = s_max;
+
+  const float dvar = (o->_realsea_dvar > 0.0f) ? o->_realsea_dvar : 1.0f;
+  if (s_max <= 0.0f) {
+    const float uniform = 1.0f / float(M_PI);
+    for (int i = 0; i < lut_size; i++) {
+      o->_realsea_spread_lut[i] = uniform;
+    }
+    return;
+  }
+
+  for (int i = 0; i < lut_size; i++) {
+    const float s = s_max * (float(i) / float(lut_size - 1));
+    const float area = realsea_spread_integral(s, dvar, samples);
+    o->_realsea_spread_lut[i] = (area > 0.0f) ? (1.0f / area) : 0.0f;
+  }
+}
+
 /* modified Phillips spectrum */
 static float Ph(Ocean *o, float kx, float kz)
 {
@@ -787,6 +853,9 @@ bool BKE_ocean_init_from_modifier(Ocean *ocean, OceanModifierData const *omd, co
                         omd->spectrum,
                         omd->fetch_jonswap,
                         omd->sharpen_peak_jonswap,
+                        omd->realsea_fmin,
+                        omd->realsea_fmax,
+                        omd->realsea_dvar,
                         do_heightfield,
                         do_chop,
                         do_spray,
@@ -811,6 +880,9 @@ bool BKE_ocean_init(Ocean *o,
                     int spectrum,
                     float fetch_jonswap,
                     float sharpen_peak_jonswap,
+                    float realsea_fmin,
+                    float realsea_fmax,
+                    float realsea_dvar,
                     short do_height_field,
                     short do_chop,
                     short do_spray,
@@ -844,6 +916,18 @@ bool BKE_ocean_init(Ocean *o,
   /* Common JONSWAP parameters. */
   o->_fetch_jonswap = fetch_jonswap;
   o->_sharpen_peak_jonswap = sharpen_peak_jonswap * 10.0f;
+
+  /* Realsea parameters. */
+  o->_realsea_fmin = std::max(realsea_fmin, 0.0f);
+  o->_realsea_fmax = realsea_fmax;
+  if (o->_realsea_fmax > 0.0f && o->_realsea_fmax < o->_realsea_fmin) {
+    std::swap(o->_realsea_fmin, o->_realsea_fmax);
+  }
+  o->_realsea_dvar = (realsea_dvar > 0.0f) ? realsea_dvar : 1.0f;
+  o->_realsea_fp = 0.0f;
+  o->_realsea_sp = 0.0f;
+  o->_realsea_s_max = 0.0f;
+  o->_realsea_lut_size = 0;
 
   /* NOTE: most modifiers don't account for failure to allocate.
    * In this case however a large resolution can easily perform large allocations that fail,
@@ -910,6 +994,36 @@ bool BKE_ocean_init(Ocean *o,
     }
   }
 
+  if (ELEM(o->_spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP)) {
+    const float tau = 2.0f * float(M_PI);
+    const float U10 = o->_V / 1.025f;
+    o->_realsea_fp = 0.0f;
+    o->_realsea_sp = 0.0f;
+
+    if (o->_spectrum == MOD_OCEAN_SPECTRUM_REALSEA_PM) {
+      const float U195 = o->_V;
+      if (U195 > 0.0f) {
+        o->_realsea_fp = 0.8772f * GRAVITY / (tau * U195);
+      }
+    }
+    else {
+      if (U10 > 0.0f && o->_fetch_jonswap > 0.0f) {
+        const float omega_p = 22.0f *
+                              powf((GRAVITY * GRAVITY) / (U10 * o->_fetch_jonswap), 1.0f / 3.0f);
+        o->_realsea_fp = omega_p / tau;
+      }
+    }
+
+    if (o->_realsea_fp > 0.0f && U10 > 0.0f) {
+      const float denom = GRAVITY / (tau * o->_realsea_fp);
+      if (denom > 0.0f) {
+        o->_realsea_sp = 11.5f * powf(U10 / denom, -2.5f);
+      }
+    }
+
+    ocean_realsea_build_spread_lut(o);
+  }
+
   RNG *rng = BLI_rng_new(seed);
 
   for (i = 0; i < o->_M; i++) {
@@ -946,6 +1060,26 @@ bool BKE_ocean_init(Ocean *o,
               o->_h0_minus[i * o->_N + j],
               r1r2,
               sqrt(BLI_ocean_spectrum_texelmarsenarsloe(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
+          break;
+        case MOD_OCEAN_SPECTRUM_REALSEA_PM:
+          mul_complex_f(
+              o->_h0[i * o->_N + j],
+              r1r2,
+              sqrt(BLI_ocean_spectrum_realsea_pm(o, o->_kx[i], o->_kz[j]) / 2.0f));
+          mul_complex_f(
+              o->_h0_minus[i * o->_N + j],
+              r1r2,
+              sqrt(BLI_ocean_spectrum_realsea_pm(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
+          break;
+        case MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP:
+          mul_complex_f(
+              o->_h0[i * o->_N + j],
+              r1r2,
+              sqrt(BLI_ocean_spectrum_realsea_jonswap(o, o->_kx[i], o->_kz[j]) / 2.0f));
+          mul_complex_f(
+              o->_h0_minus[i * o->_N + j],
+              r1r2,
+              sqrt(BLI_ocean_spectrum_realsea_jonswap(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
         case MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ:
           mul_complex_f(o->_h0[i * o->_N + j],
@@ -1094,6 +1228,13 @@ void BKE_ocean_free_data(Ocean *oc)
     MEM_delete(oc->_h0_minus);
     MEM_delete(oc->_kx);
     MEM_delete(oc->_kz);
+  }
+
+  if (oc->_realsea_spread_lut) {
+    MEM_freeN(oc->_realsea_spread_lut);
+    oc->_realsea_spread_lut = nullptr;
+    oc->_realsea_lut_size = 0;
+    oc->_realsea_s_max = 0.0f;
   }
 
   BLI_rw_mutex_unlock(&oc->oceanmutex);
@@ -1603,6 +1744,9 @@ bool BKE_ocean_init(Ocean * /*o*/,
                     int /*spectrum*/,
                     float /*fetch_jonswap*/,
                     float /*sharpen_peak_jonswap*/,
+                    float /*realsea_fmin*/,
+                    float /*realsea_fmax*/,
+                    float /*realsea_dvar*/,
                     short /*do_height_field*/,
                     short /*do_chop*/,
                     short /*do_spray*/,
