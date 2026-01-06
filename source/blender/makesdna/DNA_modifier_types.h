@@ -1408,6 +1408,11 @@ typedef struct OceanModifierData {
   float fetch_jonswap;
   float sharpen_peak_jonswap;
 
+  /* Realsea-specific parameters. */
+  float realsea_fmin;
+  float realsea_fmax;
+  float realsea_dvar;
+
   int bakestart;
   int bakeend;
 
@@ -1430,7 +1435,7 @@ typedef struct OceanModifierData {
 
   float foam_fade;
 
-  char _pad[4];
+  char _pad[8];
 } OceanModifierData;
 
 enum {
@@ -1444,6 +1449,8 @@ enum {
   MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ = 1,
   MOD_OCEAN_SPECTRUM_JONSWAP = 2,
   MOD_OCEAN_SPECTRUM_TEXEL_MARSEN_ARSLOE = 3,
+  MOD_OCEAN_SPECTRUM_REALSEA_PM = 4,
+  MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP = 5,
 };
 
 enum {

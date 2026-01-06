@@ -466,6 +466,9 @@
     .spectrum = MOD_OCEAN_SPECTRUM_PHILLIPS, \
     .fetch_jonswap = 120.0f, \
     .sharpen_peak_jonswap = 0.0f, \
+    .realsea_fmin = 0.02f, \
+    .realsea_fmax = 2.0f, \
+    .realsea_dvar = 2.0f, \
     .bakestart = 1, \
     .bakeend = 250, \
     .cachepath = "", \
