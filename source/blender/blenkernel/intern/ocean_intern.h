@@ -57,6 +57,16 @@ struct Ocean {
   float _fetch_jonswap;
   float _sharpen_peak_jonswap;
 
+  /* Realsea parameters. */
+  float _realsea_fmin;
+  float _realsea_fmax;
+  float _realsea_dvar;
+  float _realsea_fp;
+  float _realsea_sp;
+  float _realsea_s_max;
+  int _realsea_lut_size;
+  float *_realsea_spread_lut;
+
   /* mutex for threaded texture access */
   ThreadRWMutex oceanmutex;
 

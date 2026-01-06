@@ -91,6 +91,9 @@ bool BKE_ocean_init(struct Ocean *o,
                     int spectrum,
                     float fetch_jonswap,
                     float sharpen_peak_jonswap,
+                    float realsea_fmin,
+                    float realsea_fmax,
+                    float realsea_dvar,
                     short do_height_field,
                     short do_chop,
                     short do_spray,
@@ -163,5 +166,13 @@ float BLI_ocean_spectrum_texelmarsenarsloe(const struct Ocean *oc, float kx, flo
  * called the fetch, or the distance over which the wind blows with constant velocity.
  */
 float BLI_ocean_spectrum_jonswap(const struct Ocean *oc, float kx, float kz);
+/**
+ * Realsea PM spectrum with frequency-dependent directional spreading.
+ */
+float BLI_ocean_spectrum_realsea_pm(const struct Ocean *oc, float kx, float kz);
+/**
+ * Realsea JONSWAP spectrum with frequency-dependent directional spreading.
+ */
+float BLI_ocean_spectrum_realsea_jonswap(const struct Ocean *oc, float kx, float kz);
 
 }  // namespace blender
