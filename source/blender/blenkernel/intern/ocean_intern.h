@@ -43,6 +43,7 @@ struct Ocean {
 
   float normalize_factor; /* init w */
   float time;
+  int _use_wave_scale;
 
   short _do_disp_y;
   short _do_normals;
@@ -61,6 +62,7 @@ struct Ocean {
   float _realsea_fmin;
   float _realsea_fmax;
   float _realsea_dvar;
+  int _realsea_use_spread;
   float _realsea_fp;
   float _realsea_sp;
   float _realsea_s_max;

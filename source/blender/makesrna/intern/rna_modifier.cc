@@ -6616,6 +6616,13 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Wave Scale", "Scale of the displacement effect");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
+  prop = RNA_def_property(srna, "use_wave_scale", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_USE_WAVE_SCALE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Use Scale", "Use wave scale and normalization for displacement");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
   prop = RNA_def_property(srna, "depth", PROP_FLOAT, PROP_DISTANCE);
   RNA_def_property_float_sdna(prop, nullptr, "depth");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
@@ -6698,6 +6705,13 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop, "Max Frequency", "Maximum frequency for Realsea spectra (Hz)");
   RNA_def_property_ui_range(prop, 0.0, 10.0, 0.1, 3);
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "realsea_use_spread", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_USE_REALSEA_SPREAD);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "Use Directional Spread", "Apply Realsea directional spreading term");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "realsea_spread", PROP_FLOAT, PROP_NONE);
