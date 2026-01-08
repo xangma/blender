@@ -74,7 +74,7 @@
   { \
     .start = 1.0f, \
     .length = 100.0f, \
-    .flag = 0, \
+    .flag = MOD_OCEAN_USE_WAVE_SCALE, \
     .randomize = 0, \
     .seed = 0, \
   }
@@ -212,7 +212,7 @@
     .lambda = 0.5f, \
     .scale = 1.0f, \
     .repeat = 5, \
-    .flag = 0, \
+    .flag = MOD_OCEAN_USE_REALSEA_SPREAD, \
     .smooth_type = MOD_CORRECTIVESMOOTH_SMOOTH_SIMPLE, \
     .defgrp_name = "", \
   }

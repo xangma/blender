@@ -39,15 +39,21 @@
 #include "MOD_ui_common.hh"
 
 #ifdef WITH_OCEANSIM
+static float ocean_wave_scale_effective(const OceanModifierData *omd)
+{
+  return (omd->flag & MOD_OCEAN_USE_WAVE_SCALE) ? omd->wave_scale : 1.0f;
+}
+
 static void init_cache_data(Object *ob, OceanModifierData *omd, const int resolution)
 {
   const char *relbase = BKE_modifier_path_relbase_from_global(ob);
+  const float wave_scale = ocean_wave_scale_effective(omd);
 
   omd->oceancache = BKE_ocean_init_cache(omd->cachepath,
                                          relbase,
                                          omd->bakestart,
                                          omd->bakeend,
-                                         omd->wave_scale,
+                                         wave_scale,
                                          omd->chop_amount,
                                          omd->foam_coverage,
                                          omd->foam_fade,
@@ -56,7 +62,8 @@ static void init_cache_data(Object *ob, OceanModifierData *omd, const int resolu
 
 static void simulate_ocean_modifier(OceanModifierData *omd)
 {
-  BKE_ocean_simulate(omd->ocean, omd->time, omd->wave_scale, omd->chop_amount);
+  const float wave_scale = ocean_wave_scale_effective(omd);
+  BKE_ocean_simulate(omd->ocean, omd->time, wave_scale, omd->chop_amount);
 }
 #endif /* WITH_OCEANSIM */
 
@@ -516,7 +523,10 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
   uiLayoutSetPropSep(layout, true);
 
   col = &layout->column(false);
-  col->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
+  col->prop(ptr, "use_wave_scale", UI_ITEM_NONE, IFACE_("Use Scale"), ICON_NONE);
+  sub = &col->column(false);
+  uiLayoutSetActive(sub, RNA_boolean_get(ptr, "use_wave_scale"));
+  sub->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
   col->prop(ptr, "wave_scale_min", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "choppiness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "wind_velocity", UI_ITEM_NONE, std::nullopt, ICON_NONE);
@@ -592,7 +602,7 @@ static void spray_panel_draw(const bContext * /*C*/, Panel *panel)
 
 static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
 {
-  uiLayout *col;
+  uiLayout *col, *sub;
   uiLayout *layout = panel->layout;
 
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
@@ -615,7 +625,10 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
     col->separator();
     col->prop(ptr, "realsea_fmin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     col->prop(ptr, "realsea_fmax", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    col->prop(ptr, "realsea_spread", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col->prop(ptr, "realsea_use_spread", UI_ITEM_NONE, IFACE_("Use Directional Spread"), ICON_NONE);
+    sub = &col->column(false);
+    uiLayoutSetActive(sub, RNA_boolean_get(ptr, "realsea_use_spread"));
+    sub->prop(ptr, "realsea_spread", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
 }
 

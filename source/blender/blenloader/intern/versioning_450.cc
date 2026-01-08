@@ -15,6 +15,8 @@
 #include "DNA_defaults.h"
 #include "DNA_light_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
+#include "DNA_object_types.h"
 #include "DNA_object_force_types.h"
 #include "DNA_sequence_types.h"
 
@@ -6430,6 +6432,28 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 88)) {
+    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
+      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+        if (md->type == eModifierType_Ocean) {
+          OceanModifierData *omd = (OceanModifierData *)md;
+          omd->flag |= MOD_OCEAN_USE_WAVE_SCALE;
+        }
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 89)) {
+    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
+      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+        if (md->type == eModifierType_Ocean) {
+          OceanModifierData *omd = (OceanModifierData *)md;
+          omd->flag |= MOD_OCEAN_USE_REALSEA_SPREAD;
+        }
+      }
+    }
   }
 
   /* Always run this versioning (keep at the bottom of the function). Meshes are written with the
