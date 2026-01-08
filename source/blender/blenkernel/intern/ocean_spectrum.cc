@@ -51,7 +51,7 @@ static float alpha_beta_spectrum(const float alpha,
                                  const float omega,
                                  const float peakomega)
 {
-  return (alpha * sqrt(gamma) / pow(omega, 5.0)) * exp(-beta * pow(peakomega / omega, 4.0));
+  return (alpha * gamma * gamma / pow(omega, 5.0)) * exp(-beta * pow(peakomega / omega, 4.0));
 }
 
 static float peak_sharpen(const float omega, const float peakomega, const float gamma)
@@ -71,7 +71,7 @@ static float ocean_spectrum_wind_and_damp(const Ocean *oc,
                                           const float val)
 {
   const float k2 = kx * kx + kz * kz;
-  const float k_mag_inv = 1.0f / k2;
+  const float k_mag_inv = 1.0f / sqrt(k2);
   const float k_dot_w = (kx * k_mag_inv * oc->_wx) + (kz * k_mag_inv * oc->_wz);
 
   /* Bias towards wind direction. */
@@ -316,8 +316,8 @@ float BLI_ocean_spectrum_realsea_pm(const Ocean *oc, const float kx, const float
   const float ratio = fp / f;
   const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
                    expf(-1.25f * powf(ratio, 4.0f));
-  const float spread = realsea_directional_spread(oc, f, kx, kz);
-  if (spread == 0.0f) {
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 
@@ -369,8 +369,8 @@ float BLI_ocean_spectrum_realsea_jonswap(const Ocean *oc, const float kx, const 
   const float rj = expf(-1.0f / (2.0f * sigma * sigma) * powf((f / fp) - 1.0f, 2.0f));
   const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
                    expf(-1.25f * powf(ratio, 4.0f)) * powf(3.3f, rj);
-  const float spread = realsea_directional_spread(oc, f, kx, kz);
-  if (spread == 0.0f) {
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 

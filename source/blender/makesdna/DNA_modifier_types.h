@@ -1451,6 +1451,8 @@ enum OceanModifierFlag : char {
   MOD_OCEAN_GENERATE_NORMALS = (1 << 1),
   MOD_OCEAN_GENERATE_SPRAY = (1 << 2),
   MOD_OCEAN_INVERT_SPRAY = (1 << 3),
+  MOD_OCEAN_USE_WAVE_SCALE = (1 << 4),
+  MOD_OCEAN_USE_REALSEA_SPREAD = (1 << 5),
 };
 ENUM_OPERATORS(OceanModifierFlag);
 

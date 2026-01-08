@@ -696,7 +696,7 @@ static void ocean_compute_normal_z(TaskPool *__restrict pool, void * /*taskdata*
 
       init_complex(mul_param, 0.0, -1.0);
       mul_complex_c(mul_param, mul_param, o->_htilda[i * (1 + o->_N / 2) + j]);
-      mul_complex_f(mul_param, mul_param, o->_kz[i]);
+      mul_complex_f(mul_param, mul_param, o->_kz[j]);
       init_complex(o->_fft_in_nz[i * (1 + o->_N / 2) + j], real_c(mul_param), image_c(mul_param));
     }
   }
@@ -856,6 +856,8 @@ bool BKE_ocean_init_from_modifier(Ocean *ocean, OceanModifierData const *omd, co
                         omd->realsea_fmin,
                         omd->realsea_fmax,
                         omd->realsea_dvar,
+                        (omd->flag & MOD_OCEAN_USE_REALSEA_SPREAD) != 0,
+                        (omd->flag & MOD_OCEAN_USE_WAVE_SCALE) != 0,
                         do_heightfield,
                         do_chop,
                         do_spray,
@@ -883,6 +885,8 @@ bool BKE_ocean_init(Ocean *o,
                     float realsea_fmin,
                     float realsea_fmax,
                     float realsea_dvar,
+                    int use_realsea_spread,
+                    int use_wave_scale,
                     short do_height_field,
                     short do_chop,
                     short do_spray,
@@ -909,6 +913,7 @@ bool BKE_ocean_init(Ocean *o,
   o->_wz = -sin(w);        /* wave direction */
   o->_L = V * V / GRAVITY; /* largest wave for a given velocity V */
   o->time = time;
+  o->_use_wave_scale = use_wave_scale;
 
   /* Spectrum to use. */
   o->_spectrum = spectrum;
@@ -924,6 +929,7 @@ bool BKE_ocean_init(Ocean *o,
     std::swap(o->_realsea_fmin, o->_realsea_fmax);
   }
   o->_realsea_dvar = (realsea_dvar > 0.0f) ? realsea_dvar : 1.0f;
+  o->_realsea_use_spread = use_realsea_spread;
   o->_realsea_fp = 0.0f;
   o->_realsea_sp = 0.0f;
   o->_realsea_s_max = 0.0f;
@@ -1021,7 +1027,9 @@ bool BKE_ocean_init(Ocean *o,
       }
     }
 
-    ocean_realsea_build_spread_lut(o);
+    if (o->_realsea_use_spread) {
+      ocean_realsea_build_spread_lut(o);
+    }
   }
 
   RNG *rng = BLI_rng_new(seed);
@@ -1039,6 +1047,14 @@ bool BKE_ocean_init(Ocean *o,
       BLI_rng_seed(rng, new_seed);
       float r1 = gaussRand(rng);
       float r2 = gaussRand(rng);
+
+      if (o->_realsea_use_spread &&
+          ELEM(o->_spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP))
+      {
+        float phi = BLI_rng_get_float(rng) * 2.0f * float(M_PI);
+        r1 = cosf(phi);
+        r2 = sinf(phi);
+      }
 
       fftw_complex r1r2;
       init_complex(r1r2, r1, r2);
@@ -1062,14 +1078,12 @@ bool BKE_ocean_init(Ocean *o,
               sqrt(BLI_ocean_spectrum_texelmarsenarsloe(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
         case MOD_OCEAN_SPECTRUM_REALSEA_PM:
-          mul_complex_f(
-              o->_h0[i * o->_N + j],
-              r1r2,
-              sqrt(BLI_ocean_spectrum_realsea_pm(o, o->_kx[i], o->_kz[j]) / 2.0f));
-          mul_complex_f(
-              o->_h0_minus[i * o->_N + j],
-              r1r2,
-              sqrt(BLI_ocean_spectrum_realsea_pm(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
+          mul_complex_f(o->_h0[i * o->_N + j],
+                        r1r2,
+                        sqrt(BLI_ocean_spectrum_realsea_pm(o, o->_kx[i], o->_kz[j]) / 2.0f));
+          mul_complex_f(o->_h0_minus[i * o->_N + j],
+                        r1r2,
+                        sqrt(BLI_ocean_spectrum_realsea_pm(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
         case MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP:
           mul_complex_f(
@@ -1082,9 +1096,10 @@ bool BKE_ocean_init(Ocean *o,
               sqrt(BLI_ocean_spectrum_realsea_jonswap(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
         case MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ:
-          mul_complex_f(o->_h0[i * o->_N + j],
-                        r1r2,
-                        sqrt(BLI_ocean_spectrum_piersonmoskowitz(o, o->_kx[i], o->_kz[j]) / 2.0f));
+          mul_complex_f(
+              o->_h0[i * o->_N + j],
+              r1r2,
+              sqrt(BLI_ocean_spectrum_piersonmoskowitz(o, o->_kx[i], o->_kz[j]) / 2.0f));
           mul_complex_f(
               o->_h0_minus[i * o->_N + j],
               r1r2,
@@ -1161,7 +1176,12 @@ bool BKE_ocean_init(Ocean *o,
 
   BLI_rw_mutex_unlock(&o->oceanmutex);
 
-  set_height_normalize_factor(o);
+  if (o->_use_wave_scale) {
+    set_height_normalize_factor(o);
+  }
+  else {
+    o->normalize_factor = 1.0f;
+  }
 
   BLI_rng_free(rng);
 
@@ -1747,6 +1767,8 @@ bool BKE_ocean_init(Ocean * /*o*/,
                     float /*realsea_fmin*/,
                     float /*realsea_fmax*/,
                     float /*realsea_dvar*/,
+                    int /*use_realsea_spread*/,
+                    int /*use_wave_scale*/,
                     short /*do_height_field*/,
                     short /*do_chop*/,
                     short /*do_spray*/,
