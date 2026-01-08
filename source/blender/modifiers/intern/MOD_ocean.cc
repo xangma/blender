@@ -42,15 +42,21 @@
 namespace blender {
 
 #ifdef WITH_OCEANSIM
+static float ocean_wave_scale_effective(const OceanModifierData *omd)
+{
+  return (omd->flag & MOD_OCEAN_USE_WAVE_SCALE) ? omd->wave_scale : 1.0f;
+}
+
 static void init_cache_data(Object *ob, OceanModifierData *omd, const int resolution)
 {
   const char *relbase = BKE_modifier_path_relbase_from_global(ob);
+  const float wave_scale = ocean_wave_scale_effective(omd);
 
   omd->oceancache = BKE_ocean_init_cache(omd->cachepath,
                                          relbase,
                                          omd->bakestart,
                                          omd->bakeend,
-                                         omd->wave_scale,
+                                         wave_scale,
                                          omd->chop_amount,
                                          omd->foam_coverage,
                                          omd->foam_fade,
@@ -59,7 +65,8 @@ static void init_cache_data(Object *ob, OceanModifierData *omd, const int resolu
 
 static void simulate_ocean_modifier(OceanModifierData *omd)
 {
-  BKE_ocean_simulate(omd->ocean, omd->time, omd->wave_scale, omd->chop_amount);
+  const float wave_scale = ocean_wave_scale_effective(omd);
+  BKE_ocean_simulate(omd->ocean, omd->time, wave_scale, omd->chop_amount);
 }
 #endif /* WITH_OCEANSIM */
 
@@ -519,7 +526,10 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
   layout.use_property_split_set(true);
 
   ui::Layout *col = &layout.column(false);
-  col->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
+  col->prop(ptr, "use_wave_scale", UI_ITEM_NONE, IFACE_("Use Scale"), ICON_NONE);
+  ui::Layout *sub = &col->column(false);
+  sub->active_set(RNA_boolean_get(ptr, "use_wave_scale"));
+  sub->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
   col->prop(ptr, "wave_scale_min", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "choppiness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "wind_velocity", UI_ITEM_NONE, std::nullopt, ICON_NONE);
@@ -528,10 +538,10 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
 
   col = &layout.column(false);
   col->prop(ptr, "wave_alignment", ui::ITEM_R_SLIDER, IFACE_("Alignment"), ICON_NONE);
-  ui::Layout &sub = col->column(false);
-  sub.active_set(RNA_float_get(ptr, "wave_alignment") > 0.0f);
-  sub.prop(ptr, "wave_direction", UI_ITEM_NONE, IFACE_("Direction"), ICON_NONE);
-  sub.prop(ptr, "damping", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  ui::Layout &alignment_sub = col->column(false);
+  alignment_sub.active_set(RNA_float_get(ptr, "wave_alignment") > 0.0f);
+  alignment_sub.prop(ptr, "wave_direction", UI_ITEM_NONE, IFACE_("Direction"), ICON_NONE);
+  alignment_sub.prop(ptr, "damping", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
 static void foam_panel_draw_header(const bContext * /*C*/, Panel *panel)
@@ -607,14 +617,17 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
     col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
   else if (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP) {
-    col->prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
 
   if (ELEM(spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP)) {
-    col->separator();
-    col->prop(ptr, "realsea_fmin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    col->prop(ptr, "realsea_fmax", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    col->prop(ptr, "realsea_spread", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.separator();
+    col.prop(ptr, "realsea_fmin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.prop(ptr, "realsea_fmax", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.prop(ptr, "realsea_use_spread", UI_ITEM_NONE, IFACE_("Use Directional Spread"), ICON_NONE);
+    ui::Layout &realsea_sub = col.column(false);
+    realsea_sub.active_set(RNA_boolean_get(ptr, "realsea_use_spread"));
+    realsea_sub.prop(ptr, "realsea_spread", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
 }
 

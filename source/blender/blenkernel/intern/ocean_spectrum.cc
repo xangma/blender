@@ -316,8 +316,8 @@ float BLI_ocean_spectrum_realsea_pm(const Ocean *oc, const float kx, const float
   const float ratio = fp / f;
   const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
                    expf(-1.25f * powf(ratio, 4.0f));
-  const float spread = realsea_directional_spread(oc, f, kx, kz);
-  if (spread == 0.0f) {
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 
@@ -369,8 +369,8 @@ float BLI_ocean_spectrum_realsea_jonswap(const Ocean *oc, const float kx, const 
   const float rj = expf(-1.0f / (2.0f * sigma * sigma) * powf((f / fp) - 1.0f, 2.0f));
   const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
                    expf(-1.25f * powf(ratio, 4.0f)) * powf(3.3f, rj);
-  const float spread = realsea_directional_spread(oc, f, kx, kz);
-  if (spread == 0.0f) {
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 
