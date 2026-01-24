@@ -695,7 +695,7 @@ static void ocean_compute_normal_z(TaskPool *__restrict pool, void * /*taskdata*
 
       init_complex(mul_param, 0.0, -1.0);
       mul_complex_c(mul_param, mul_param, o->_htilda[i * (1 + o->_N / 2) + j]);
-      mul_complex_f(mul_param, mul_param, o->_kz[i]);
+      mul_complex_f(mul_param, mul_param, o->_kz[j]);
       init_complex(o->_fft_in_nz[i * (1 + o->_N / 2) + j], real_c(mul_param), image_c(mul_param));
     }
   }
