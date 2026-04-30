@@ -1424,7 +1424,10 @@ typedef struct OceanModifierData {
   char geometry_mode;
 
   char flag;
-  char _pad2;
+  char lod_levels;
+  char lod_usage_mode;
+  char lod_validation_mode;
+  char _pad0[2];
 
   short repeat_x;
   short repeat_y;
@@ -1435,13 +1438,26 @@ typedef struct OceanModifierData {
 
   float foam_fade;
 
-  char _pad[8];
+  float lod_pixel_error;
+  float lod_camera_full_spectrum_radius;
+
+  char _pad[4];
 } OceanModifierData;
 
 enum {
   MOD_OCEAN_GEOM_GENERATE = 0,
   MOD_OCEAN_GEOM_DISPLACE = 1,
   MOD_OCEAN_GEOM_SIM_ONLY = 2,
+};
+
+enum {
+  MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE = 0,
+  MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT = 1,
+};
+
+enum {
+  MOD_OCEAN_LOD_USAGE_GENERAL_RENDER = 0,
+  MOD_OCEAN_LOD_USAGE_STEREO_DATASET = 1,
 };
 
 enum {
@@ -1460,6 +1476,7 @@ enum {
   MOD_OCEAN_INVERT_SPRAY = (1 << 3),
   MOD_OCEAN_USE_WAVE_SCALE = (1 << 4),
   MOD_OCEAN_USE_REALSEA_SPREAD = (1 << 5),
+  MOD_OCEAN_USE_CAMERA_LOD = (1 << 6),
 };
 
 typedef struct WarpModifierData {

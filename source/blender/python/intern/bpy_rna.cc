@@ -6831,11 +6831,21 @@ static PyObject *pyrna_func_call(BPy_FunctionRNA *self, PyObject *args, PyObject
     /* Call function. */
     ReportList reports;
     bContext *C = BPY_context_get();
+    PyObject *report_error_type = PyExc_RuntimeError;
 
     BKE_reports_init(&reports, RPT_STORE);
     RNA_function_call(C, &reports, self_ptr, self_func, &parms);
 
-    err = BPy_reports_to_error(&reports, PyExc_RuntimeError, true);
+    if (self_ptr->type != nullptr && self_func != nullptr &&
+        STREQ(RNA_struct_identifier(self_ptr->type), "Object") &&
+        STR_ELEM(RNA_function_identifier(self_func),
+                 "calc_matrix_camera",
+                 "calc_matrix_camera_model"))
+    {
+      report_error_type = PyExc_ValueError;
+    }
+
+    err = BPy_reports_to_error(&reports, report_error_type, true);
 
     /* Return value. */
     if (err != -1) {

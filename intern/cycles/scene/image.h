@@ -111,6 +111,9 @@ class ImageLoader {
   /* Free any memory used for loading metadata and pixels. */
   virtual void cleanup(){};
 
+  /* Finalize loader state after deduplication selected a new image slot. */
+  virtual void prepare_for_storage(){};
+
   /* Compare avoid loading the same image multiple times. */
   virtual bool equals(const ImageLoader &other) const = 0;
   static bool equals(const ImageLoader *a, const ImageLoader *b);

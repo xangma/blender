@@ -18,6 +18,7 @@
 #include "util/set.h"
 #include "util/types.h"
 #include "util/unique_ptr.h"
+#include "util/vector.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -38,7 +39,7 @@ class DiagSplit;
 
 class Mesh : public Geometry {
  protected:
-  Mesh(const NodeType *node_type_, Type geom_type_);
+ Mesh(const NodeType *node_type_, Type geom_type_);
 
  public:
   NODE_DECLARE
@@ -166,6 +167,22 @@ class Mesh : public Geometry {
   NODE_SOCKET_API(Transform, subd_objecttoworld)
 
   AttributeSet subd_attributes;
+
+  /* Use vector here because ImageHandle is non-trivial and requires constructor/destructor calls.
+   */
+  vector<ImageHandle> ocean_split_slope_images;
+  vector<ImageHandle> ocean_split_slope_images_pre;
+  vector<ImageHandle> ocean_split_slope_images_post;
+  array<float3> ocean_split_cumulative_slope_moments;
+  array<float3> ocean_split_cumulative_slope_moments_pre;
+  array<float3> ocean_split_cumulative_slope_moments_post;
+  array<int> ocean_split_resolution_x;
+  array<int> ocean_split_resolution_y;
+  float ocean_split_min_wavelength = 0.0f;
+  array<float> ocean_split_cell_size_x;
+  array<float> ocean_split_cell_size_z;
+  bool ocean_modifier_active = false;
+  bool ocean_camera_lod_active = false;
 
   /* BVH */
   size_t vert_offset;

@@ -1047,8 +1047,15 @@ void BKE_camera_multiview_model_matrix(const RenderData *rd,
                                        const char *viewname,
                                        float r_modelmat[4][4])
 {
-  BKE_camera_multiview_model_matrix_scaled(rd, camera, viewname, r_modelmat);
-  normalize_m4(r_modelmat);
+  float scaled_modelmat[4][4];
+  float location[3];
+  float rotation[3][3];
+  float scale[3];
+  const float unit_scale[3] = {1.0f, 1.0f, 1.0f};
+
+  BKE_camera_multiview_model_matrix_scaled(rd, camera, viewname, scaled_modelmat);
+  mat4_to_loc_rot_size(location, rotation, scale, scaled_modelmat);
+  loc_rot_size_to_mat4(r_modelmat, location, rotation, unit_scale);
 }
 
 void BKE_camera_multiview_model_matrix_scaled(const RenderData *rd,

@@ -74,7 +74,7 @@
   { \
     .start = 1.0f, \
     .length = 100.0f, \
-    .flag = MOD_OCEAN_USE_WAVE_SCALE, \
+    .flag = 0, \
     .randomize = 0, \
     .seed = 0, \
   }
@@ -212,7 +212,7 @@
     .lambda = 0.5f, \
     .scale = 1.0f, \
     .repeat = 5, \
-    .flag = MOD_OCEAN_USE_REALSEA_SPREAD, \
+    .flag = 0, \
     .smooth_type = MOD_CORRECTIVESMOOTH_SMOOTH_SIMPLE, \
     .defgrp_name = "", \
   }
@@ -477,11 +477,16 @@
     .cached = 0, \
     .geometry_mode = 0, \
     .flag = 0, \
+    .lod_levels = 5, \
+    .lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER, \
+    .lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE, \
     .repeat_x = 1, \
     .repeat_y = 1, \
     .seed = 0, \
     .size = 1.0f, \
     .foam_fade = 0.98f, \
+    .lod_pixel_error = 0.5f, \
+    .lod_camera_full_spectrum_radius = 0.0f, \
   }
 
 #define _DNA_DEFAULT_ParticleInstanceModifierData \

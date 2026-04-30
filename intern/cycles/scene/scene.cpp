@@ -417,6 +417,15 @@ bool Scene::need_global_attribute(AttributeStandard std)
   {
     return need_motion() != MOTION_NONE;
   }
+  if (std == ATTR_STD_OCEAN_REF_COORD || std == ATTR_STD_OCEAN_REF_UV ||
+      std == ATTR_STD_OCEAN_GEOMETRY_NORMAL ||
+      std == ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE)
+  {
+    /* Split-spectrum ocean shading needs the canonical ocean coordinates, geometry-band normal,
+     * and geometry support so Cycles can evaluate the visible and unresolved bands at render
+     * time. */
+    return true;
+  }
 
   return false;
 }

@@ -148,6 +148,7 @@ set(SRC_KERNEL_CLOSURE_HEADERS
   closure/bsdf_diffuse.h
   closure/bsdf_diffuse_ramp.h
   closure/bsdf_microfacet.h
+  closure/bsdf_ocean.h
   closure/bsdf_oren_nayar.h
   closure/bsdf_phong_ramp.h
   closure/bsdf_ray_portal.h
@@ -456,6 +457,33 @@ if(UNIX AND NOT APPLE)
   set(cycles_kernel_runtime_lib_target_path ${cycles_kernel_runtime_lib_target_path}/lib)
 endif()
 
+set(cycles_runtime_copy_outputs)
+
+if(WITH_BLENDER AND NOT WITH_PYTHON_MODULE)
+  if(APPLE)
+    set(cycles_blender_runtime_versioned_dir
+      "${CMAKE_BINARY_DIR}/bin/Blender.app/Contents/Resources/${BLENDER_VERSION}")
+  else()
+    set(cycles_blender_runtime_versioned_dir "${CMAKE_BINARY_DIR}/bin/${BLENDER_VERSION}")
+  endif()
+
+  macro(cycles_blender_runtime_copy source destination)
+    get_filename_component(_cycles_runtime_name "${source}" NAME)
+    set(_cycles_runtime_dir "${cycles_blender_runtime_versioned_dir}/${destination}")
+    set(_cycles_runtime_output "${_cycles_runtime_dir}/${_cycles_runtime_name}")
+    add_custom_command(
+      OUTPUT ${_cycles_runtime_output}
+      COMMAND ${CMAKE_COMMAND} -E make_directory "${_cycles_runtime_dir}"
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${source}" "${_cycles_runtime_output}"
+      DEPENDS ${source}
+    )
+    list(APPEND cycles_runtime_copy_outputs ${_cycles_runtime_output})
+    unset(_cycles_runtime_name)
+    unset(_cycles_runtime_dir)
+    unset(_cycles_runtime_output)
+  endmacro()
+endif()
+
 # CUDA module
 
 if(WITH_CYCLES_CUDA_BINARIES)
@@ -566,6 +594,10 @@ if(WITH_CYCLES_CUDA_BINARIES)
 
     unset(_cuda_nvcc_args)
     delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "${cuda_file_compressed}" ${CYCLES_INSTALL_PATH}/lib)
+    if(WITH_BLENDER AND NOT WITH_PYTHON_MODULE)
+      cycles_blender_runtime_copy("${CMAKE_CURRENT_BINARY_DIR}/${cuda_file_compressed}"
+        "${CYCLES_INSTALL_PATH}/lib")
+    endif()
     list(APPEND cuda_cubins ${cuda_file_compressed})
 
     unset(cuda_debug_flags)
@@ -745,6 +777,10 @@ if(WITH_CYCLES_HIP_BINARIES AND WITH_CYCLES_DEVICE_HIP)
       COMMAND "$<TARGET_FILE:zstd_compress>" ${hip_file} ${hip_file_compressed}
       DEPENDS ${hip_file})
     delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "${hip_file_compressed}" ${CYCLES_INSTALL_PATH}/lib)
+    if(WITH_BLENDER AND NOT WITH_PYTHON_MODULE)
+      cycles_blender_runtime_copy("${CMAKE_CURRENT_BINARY_DIR}/${hip_file_compressed}"
+        "${CYCLES_INSTALL_PATH}/lib")
+    endif()
     list(APPEND hip_fatbins ${hip_file_compressed})
   endmacro()
 
@@ -839,6 +875,10 @@ if(WITH_CYCLES_HIP_BINARIES AND WITH_CYCLES_DEVICE_HIPRT)
       DEPENDS ${hiprt_file}
     )
     delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "${hiprt_file_compressed}" ${CYCLES_INSTALL_PATH}/lib)
+    if(WITH_BLENDER AND NOT WITH_PYTHON_MODULE)
+      cycles_blender_runtime_copy("${CMAKE_CURRENT_BINARY_DIR}/${hiprt_file_compressed}"
+        "${CYCLES_INSTALL_PATH}/lib")
+    endif()
     list(APPEND hiprt_hipfb ${hiprt_file_compressed})
   endforeach()
 
@@ -908,6 +948,9 @@ if(WITH_CYCLES_DEVICE_OPTIX AND WITH_CYCLES_CUDA_BINARIES)
     list(APPEND optix_ptx ${output_compressed})
 
     delayed_install("${CMAKE_CURRENT_BINARY_DIR}" "${output_compressed}" ${CYCLES_INSTALL_PATH}/lib)
+    if(WITH_BLENDER AND NOT WITH_PYTHON_MODULE)
+      cycles_blender_runtime_copy("${output_compressed}" "${CYCLES_INSTALL_PATH}/lib")
+    endif()
   endmacro()
 
   cycles_optix_kernel_add(
@@ -935,6 +978,11 @@ if(WITH_CYCLES_DEVICE_OPTIX AND WITH_CYCLES_CUDA_BINARIES)
 
   add_custom_target(cycles_kernel_optix ALL DEPENDS ${optix_ptx})
   cycles_set_solution_folder(cycles_kernel_optix)
+endif()
+
+if(cycles_runtime_copy_outputs)
+  add_custom_target(cycles_kernel_runtime_sync ALL DEPENDS ${cycles_runtime_copy_outputs})
+  cycles_set_solution_folder(cycles_kernel_runtime_sync)
 endif()
 
 # oneAPI module

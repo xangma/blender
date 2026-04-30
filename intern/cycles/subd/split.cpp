@@ -131,8 +131,8 @@ std::pair<int, float> DiagSplit::T(const Patch *patch,
     Plast = P;
   }
 
-  const int tmin = (int)ceilf(Lsum / params.dicing_rate);
-  const int tmax = (int)ceilf(
+  int tmin = (int)ceilf(Lsum / params.dicing_rate);
+  int tmax = (int)ceilf(
       (params.test_steps - 1) * Lmax /
       params.dicing_rate);  // XXX paper says N instead of N-1, seems wrong?
   int res = max(tmax, 1);
