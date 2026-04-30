@@ -211,10 +211,8 @@ void Camera::compute_auto_viewplane()
   }
 }
 
-void Camera::update(Scene *scene)
+void Camera::update_impl(const int need_motion, Scene *scene)
 {
-  const Scene::MotionType need_motion = scene->need_motion();
-
   if (previous_need_motion != need_motion) {
     /* scene's motion model could have been changed since previous device
      * camera update this could happen for example in case when one render
@@ -227,7 +225,7 @@ void Camera::update(Scene *scene)
   }
 
   const scoped_callback_timer timer([scene](double time) {
-    if (scene->update_stats) {
+    if (scene != nullptr && scene->update_stats) {
       scene->update_stats->camera.times.add_entry({"update", time});
     }
   });
@@ -518,6 +516,16 @@ void Camera::update_interactive_motion()
   }
 
   set_fov_pre(fov);
+}
+
+void Camera::update(Scene *scene)
+{
+  update_impl(scene->need_motion(), scene);
+}
+
+void Camera::update_for_dicing()
+{
+  update_impl(Scene::MOTION_NONE, nullptr);
 }
 
 void Camera::device_update(Device * /*device*/, DeviceScene *dscene, Scene *scene)

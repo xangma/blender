@@ -388,6 +388,19 @@ void Mesh::clear_non_sockets()
 
   num_subd_added_verts = 0;
   num_subd_faces = 0;
+  ocean_split_slope_images.clear();
+  ocean_split_slope_images_pre.clear();
+  ocean_split_slope_images_post.clear();
+  ocean_split_cumulative_slope_moments.clear();
+  ocean_split_cumulative_slope_moments_pre.clear();
+  ocean_split_cumulative_slope_moments_post.clear();
+  ocean_split_resolution_x.clear();
+  ocean_split_resolution_y.clear();
+  ocean_split_min_wavelength = 0.0f;
+  ocean_split_cell_size_x.clear();
+  ocean_split_cell_size_z.clear();
+  ocean_modifier_active = false;
+  ocean_camera_lod_active = false;
 }
 
 void Mesh::clear(bool preserve_shaders, bool preserve_voxel_data)

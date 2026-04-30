@@ -1437,6 +1437,16 @@ enum OceanModifierGeometryMode : char {
   MOD_OCEAN_GEOM_SIM_ONLY = 2,
 };
 
+enum OceanModifierLODValidationMode : char {
+  MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE = 0,
+  MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT = 1,
+};
+
+enum OceanModifierLODUsageMode : char {
+  MOD_OCEAN_LOD_USAGE_GENERAL_RENDER = 0,
+  MOD_OCEAN_LOD_USAGE_STEREO_DATASET = 1,
+};
+
 enum OceanModifierSpectrum : int {
   MOD_OCEAN_SPECTRUM_PHILLIPS = 0,
   MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ = 1,
@@ -1453,6 +1463,7 @@ enum OceanModifierFlag : char {
   MOD_OCEAN_INVERT_SPRAY = (1 << 3),
   MOD_OCEAN_USE_WAVE_SCALE = (1 << 4),
   MOD_OCEAN_USE_REALSEA_SPREAD = (1 << 5),
+  MOD_OCEAN_USE_CAMERA_LOD = (1 << 6),
 };
 ENUM_OPERATORS(OceanModifierFlag);
 
@@ -1509,8 +1520,13 @@ struct OceanModifierData {
   char cached = 0;
   OceanModifierGeometryMode geometry_mode = MOD_OCEAN_GEOM_GENERATE;
 
-  OceanModifierFlag flag = {};
-  char _pad2 = {};
+  /** #OceanModifierFlag. */
+  OceanModifierFlag flag = OceanModifierFlag(MOD_OCEAN_USE_WAVE_SCALE |
+                                             MOD_OCEAN_USE_REALSEA_SPREAD);
+  char lod_levels = 5;
+  OceanModifierLODUsageMode lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+  OceanModifierLODValidationMode lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+  char _pad2[2] = {};
 
   short repeat_x = 1;
   short repeat_y = 1;
@@ -1520,6 +1536,9 @@ struct OceanModifierData {
   float size = 1.0f;
 
   float foam_fade = 0.98f;
+
+  float lod_pixel_error = 0.5f;
+  float lod_camera_full_spectrum_radius = 0.0f;
 
   char _pad[4] = {};
 };
