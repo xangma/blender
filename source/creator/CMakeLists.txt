@@ -1876,6 +1876,9 @@ install(
 
 # Install more files specified elsewhere.
 delayed_do_install(${TARGETDIR_VER})
+if(TARGET cycles_kernel_runtime_sync)
+  add_dependencies(blender cycles_kernel_runtime_sync)
+endif()
 
 unset(BLENDER_TEXT_FILES)
 unset(TARGETDIR_TEXT)

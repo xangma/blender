@@ -75,8 +75,10 @@ ImageHandle::ImageHandle(const ImageHandle &other)
     : slots(other.slots), is_tiled(other.is_tiled), manager(other.manager)
 {
   /* Increase image user count. */
-  for (const size_t slot : slots) {
-    manager->add_image_user(slot);
+  if (manager != nullptr) {
+    for (const size_t slot : slots) {
+      manager->add_image_user(slot);
+    }
   }
 }
 
@@ -87,8 +89,10 @@ ImageHandle &ImageHandle::operator=(const ImageHandle &other)
   is_tiled = other.is_tiled;
   slots = other.slots;
 
-  for (const size_t slot : slots) {
-    manager->add_image_user(slot);
+  if (manager != nullptr) {
+    for (const size_t slot : slots) {
+      manager->add_image_user(slot);
+    }
   }
 
   return *this;
@@ -101,8 +105,10 @@ ImageHandle::~ImageHandle()
 
 void ImageHandle::clear()
 {
-  for (const size_t slot : slots) {
-    manager->remove_image_user(slot);
+  if (manager != nullptr) {
+    for (const size_t slot : slots) {
+      manager->remove_image_user(slot);
+    }
   }
 
   slots.clear();
@@ -419,6 +425,8 @@ size_t ImageManager::add_image_slot(unique_ptr<ImageLoader> &&loader,
   if (slot == images.size()) {
     images.resize(images.size() + 1);
   }
+
+  loader->prepare_for_storage();
 
   /* Add new image. */
   unique_ptr<Image> img = make_unique<Image>();
