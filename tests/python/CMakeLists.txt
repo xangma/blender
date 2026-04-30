@@ -569,6 +569,41 @@ if(TEST_SRC_DIR_EXISTS)
     )
   endif()
 
+  if(WITH_MOD_OCEANSIM AND WITH_CYCLES)
+    add_blender_test(
+      physics_ocean_split_spectrum
+      --python ${TEST_PYTHON_DIR}/physics_ocean_split_spectrum.py
+    )
+
+    add_blender_test(
+      physics_ocean_lod_benchmark_report
+      --python ${TEST_PYTHON_DIR}/ocean_camera_lod_benchmark.py
+      --
+      --outdir ${TEST_OUT_DIR}/ocean_camera_lod_benchmark_report
+      --scenarios calm_reference
+      --devices CPU
+      --mode report
+      --samples 4
+      --resolution 64
+      --repeat-eval 1
+      --repeat-render 1
+    )
+
+    add_blender_test(
+      physics_ocean_lod_benchmark_strict
+      --python ${TEST_PYTHON_DIR}/ocean_camera_lod_benchmark.py
+      --
+      --outdir ${TEST_OUT_DIR}/ocean_camera_lod_benchmark_strict
+      --scenarios calm_reference
+      --devices CPU
+      --mode strict
+      --samples 4
+      --resolution 64
+      --repeat-eval 1
+      --repeat-render 1
+    )
+  endif()
+
   add_blender_test(
     physics_particle_system
     ${TEST_SRC_DIR}/physics/physics_particle_test.blend

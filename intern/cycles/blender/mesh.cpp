@@ -3,6 +3,9 @@
  * SPDX-License-Identifier: Apache-2.0 */
 
 #include <algorithm>
+#include <cstdarg>
+#include <cstdlib>
+#include <cstring>
 #include <optional>
 
 #include "blender/attribute_convert.h"
@@ -10,12 +13,10 @@
 #include "blender/sync.h"
 #include "blender/util.h"
 
-#include "scene/camera.h"
+#include "scene/image.h"
 #include "scene/mesh.h"
 #include "scene/object.h"
 #include "scene/scene.h"
-
-#include "subd/split.h"
 
 #include "util/algorithm.h"
 #include "util/disjoint_set.h"
@@ -23,8 +24,7 @@
 #include "util/hash.h"
 #include "util/log.h"
 #include "util/math.h"
-
-#include "DNA_modifier_types.h"
+#include "util/time.h"
 
 #include "BKE_anonymous_attribute_id.hh"
 #include "BKE_attribute.h"
@@ -32,12 +32,325 @@
 #include "BKE_attribute_math.hh"
 #include "BKE_customdata.hh"
 #include "BKE_mesh.hh"
+#include "BKE_ocean.h"
+
+#include "DNA_modifier_types.h"
 
 #include "GEO_mesh_split_edges.hh"
 
 using blender::Attribute;
 
 CCL_NAMESPACE_BEGIN
+
+static bool ocean_camera_lod_profile_enabled()
+{
+  const char *value = std::getenv("BLENDER_OCEAN_CAMERA_LOD_PROFILE");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static void ocean_camera_lod_profile_logv(const char *object_name,
+                                          const char *stage,
+                                          const char *fmt,
+                                          va_list args)
+{
+  if (!ocean_camera_lod_profile_enabled()) {
+    return;
+  }
+
+  printf("[OCEAN_CAMERA_LOD_PROFILE] object='%s' stage=%s ",
+         object_name ? object_name : "<none>",
+         stage);
+  vprintf(fmt, args);
+  printf("\n");
+  fflush(stdout);
+}
+
+static void ocean_camera_lod_profile_logf(const char *object_name,
+                                          const char *stage,
+                                          const char *fmt,
+                                          ...)
+{
+  va_list args;
+  va_start(args, fmt);
+  ocean_camera_lod_profile_logv(object_name, stage, fmt, args);
+  va_end(args);
+}
+
+class BlenderOceanSplitSlopeLoader : public ImageLoader {
+ public:
+  BlenderOceanSplitSlopeLoader(const ::Ocean *ocean,
+                               const OceanSplitRuntimeLevel &level,
+                               const int level_index)
+      : ocean_(ocean),
+        width_(level.size_x),
+        height_(level.size_y),
+        level_index_(level_index),
+        revision_(BKE_ocean_split_runtime_revision_get(ocean))
+  {
+  }
+
+  bool load_metadata(const ImageDeviceFeatures & /*features*/, ImageMetaData &metadata) override
+  {
+    metadata.type = IMAGE_DATA_TYPE_FLOAT4;
+    metadata.channels = 4;
+    metadata.width = width_;
+    metadata.height = height_;
+    metadata.depth = 1;
+    return true;
+  }
+
+  bool load_pixels(const ImageMetaData & /*metadata*/,
+                   void *pixels,
+                   const size_t pixels_size,
+                   const bool /*associate_alpha*/) override
+  {
+    if (pixels_.empty()) {
+      prepare_for_storage();
+    }
+
+    const size_t expected_elements = size_t(width_) * size_t(height_) * 4;
+    if (pixels_size != expected_elements || pixels_.size() != expected_elements) {
+      return false;
+    }
+
+    memcpy(pixels, pixels_.data(), pixels_.size() * sizeof(float));
+    return true;
+  }
+
+  void prepare_for_storage() override
+  {
+    if (!pixels_.empty() || ocean_ == nullptr || width_ <= 0 || height_ <= 0) {
+      return;
+    }
+
+    const size_t pixel_count = size_t(width_) * size_t(height_);
+    pixels_.resize(pixel_count * 4);
+    if (!BKE_ocean_split_runtime_level_normal_data_get(
+            ocean_, level_index_, pixels_.data(), int(pixels_.size())))
+    {
+      pixels_.clear();
+      width_ = 0;
+      height_ = 0;
+    }
+  }
+
+  string name() const override
+  {
+    return "ocean_split_normal";
+  }
+
+  bool equals(const ImageLoader &other) const override
+  {
+    const BlenderOceanSplitSlopeLoader &other_loader = static_cast<const BlenderOceanSplitSlopeLoader &>(
+        other);
+    return ocean_ == other_loader.ocean_ && width_ == other_loader.width_ &&
+           height_ == other_loader.height_ && level_index_ == other_loader.level_index_ &&
+           revision_ == other_loader.revision_;
+  }
+
+ private:
+  const ::Ocean *ocean_;
+  int width_;
+  int height_;
+  int level_index_;
+  uint64_t revision_ = 0;
+  vector<float> pixels_;
+};
+
+static const ::OceanModifierData *blender_object_ocean_split_modifier(const BObjectInfo &b_ob_info)
+{
+  /* The live Ocean runtime is owned by the evaluated depsgraph object, not the persistent
+   * original object stored in `real_object`. */
+  const ::Object *object = static_cast<const ::Object *>(b_ob_info.iter_object.ptr.data);
+  if (!object) {
+    return nullptr;
+  }
+
+  for (const ::ModifierData *md = static_cast<const ::ModifierData *>(object->modifiers.last); md;
+       md = md->prev)
+  {
+    if (md->type != eModifierType_Ocean) {
+      continue;
+    }
+
+    const ::OceanModifierData *omd = reinterpret_cast<const ::OceanModifierData *>(md);
+    if ((omd->flag & MOD_OCEAN_USE_CAMERA_LOD) == 0 || omd->geometry_mode != MOD_OCEAN_GEOM_GENERATE)
+    {
+      continue;
+    }
+    if (!omd->ocean || !BKE_ocean_is_valid(omd->ocean)) {
+      return nullptr;
+    }
+    return omd;
+  }
+
+  return nullptr;
+}
+
+static bool sync_ocean_split_runtime_step_resources(
+    Scene *scene,
+    const ::OceanModifierData *omd,
+    vector<ImageHandle> *r_slope_images,
+    array<float3> *r_cumulative_slope_moments,
+    array<int> *r_resolution_x,
+    array<int> *r_resolution_y,
+    float *r_min_wavelength,
+    array<float> *r_cell_size_x,
+    array<float> *r_cell_size_z)
+{
+  if (omd->lod_usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
+    if (r_slope_images != nullptr) {
+      r_slope_images->clear();
+    }
+    if (r_cumulative_slope_moments != nullptr) {
+      r_cumulative_slope_moments->clear();
+    }
+    if (r_resolution_x != nullptr) {
+      r_resolution_x->clear();
+    }
+    if (r_resolution_y != nullptr) {
+      r_resolution_y->clear();
+    }
+    if (r_cell_size_x != nullptr) {
+      r_cell_size_x->clear();
+    }
+    if (r_cell_size_z != nullptr) {
+      r_cell_size_z->clear();
+    }
+    return false;
+  }
+
+  const int level_count = std::min(BKE_ocean_split_level_count_get(omd->ocean), OCEAN_SPLIT_MAX_LEVELS);
+  if (level_count <= 0) {
+    if (r_slope_images != nullptr) {
+      r_slope_images->clear();
+    }
+    if (r_cumulative_slope_moments != nullptr) {
+      r_cumulative_slope_moments->clear();
+    }
+    if (r_resolution_x != nullptr) {
+      r_resolution_x->clear();
+    }
+    if (r_resolution_y != nullptr) {
+      r_resolution_y->clear();
+    }
+    if (r_cell_size_x != nullptr) {
+      r_cell_size_x->clear();
+    }
+    if (r_cell_size_z != nullptr) {
+      r_cell_size_z->clear();
+    }
+    return false;
+  }
+
+  if (r_slope_images != nullptr) {
+    r_slope_images->resize(level_count);
+  }
+  if (r_cumulative_slope_moments != nullptr) {
+    r_cumulative_slope_moments->resize(level_count);
+  }
+  if (r_resolution_x != nullptr) {
+    r_resolution_x->resize(level_count);
+  }
+  if (r_resolution_y != nullptr) {
+    r_resolution_y->resize(level_count);
+  }
+  if (r_min_wavelength != nullptr) {
+    *r_min_wavelength = BKE_ocean_split_min_wavelength_get(omd->ocean);
+  }
+  if (r_cell_size_x != nullptr) {
+    r_cell_size_x->resize(level_count);
+  }
+  if (r_cell_size_z != nullptr) {
+    r_cell_size_z->resize(level_count);
+  }
+
+  for (int level_index = 0; level_index < level_count; level_index++) {
+    OceanSplitRuntimeLevel level;
+    if (!BKE_ocean_split_runtime_level_get(omd->ocean, level_index, &level)) {
+      if (r_slope_images != nullptr) {
+        r_slope_images->resize(level_index);
+      }
+      if (r_cumulative_slope_moments != nullptr) {
+        r_cumulative_slope_moments->resize(level_index);
+      }
+      if (r_resolution_x != nullptr) {
+        r_resolution_x->resize(level_index);
+      }
+      if (r_resolution_y != nullptr) {
+        r_resolution_y->resize(level_index);
+      }
+      if (r_cell_size_x != nullptr) {
+        r_cell_size_x->resize(level_index);
+      }
+      if (r_cell_size_z != nullptr) {
+        r_cell_size_z->resize(level_index);
+      }
+      return false;
+    }
+    if (r_slope_images != nullptr) {
+      ImageParams params;
+      params.interpolation = INTERPOLATION_LINEAR;
+      params.extension = EXTENSION_REPEAT;
+      params.frame = omd->time;
+
+      (*r_slope_images)[level_index] = scene->image_manager->add_image(
+          make_unique<BlenderOceanSplitSlopeLoader>(omd->ocean, level, level_index), params, false);
+    }
+
+    if (r_cumulative_slope_moments != nullptr) {
+      (*r_cumulative_slope_moments)[level_index] = make_float3(level.cumulative_slope_moment[0],
+                                                               level.cumulative_slope_moment[1],
+                                                               level.cumulative_slope_moment[2]);
+    }
+
+    if (r_resolution_x != nullptr) {
+      (*r_resolution_x)[level_index] = level.size_x;
+    }
+    if (r_resolution_y != nullptr) {
+      (*r_resolution_y)[level_index] = level.size_y;
+    }
+    if (r_cell_size_x != nullptr) {
+      (*r_cell_size_x)[level_index] = (level.size_x > 0) ? (omd->spatial_size / float(level.size_x)) : 0.0f;
+    }
+    if (r_cell_size_z != nullptr) {
+      (*r_cell_size_z)[level_index] = (level.size_y > 0) ? (omd->spatial_size / float(level.size_y)) : 0.0f;
+    }
+  }
+
+  return true;
+}
+
+static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_info, Mesh *mesh)
+{
+  const ::OceanModifierData *omd = blender_object_ocean_split_modifier(b_ob_info);
+  mesh->ocean_split_slope_images_pre.clear();
+  mesh->ocean_split_slope_images_post.clear();
+  mesh->ocean_split_cumulative_slope_moments_pre.clear();
+  mesh->ocean_split_cumulative_slope_moments_post.clear();
+  mesh->ocean_split_resolution_x.clear();
+  mesh->ocean_split_resolution_y.clear();
+  mesh->ocean_split_cell_size_x.clear();
+  mesh->ocean_split_cell_size_z.clear();
+  if (!omd) {
+    return;
+  }
+
+  if (omd->lod_usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
+    return;
+  }
+
+  sync_ocean_split_runtime_step_resources(
+      scene,
+      omd,
+      &mesh->ocean_split_slope_images,
+      &mesh->ocean_split_cumulative_slope_moments,
+      &mesh->ocean_split_resolution_x,
+      &mesh->ocean_split_resolution_y,
+      &mesh->ocean_split_min_wavelength,
+      &mesh->ocean_split_cell_size_x,
+      &mesh->ocean_split_cell_size_z);
+}
 
 static void attr_create_motion_from_velocity(Mesh *mesh,
                                              const blender::Span<blender::float3> b_attr,
@@ -106,12 +419,20 @@ static void attr_create_generic(Scene *scene,
   const blender::bke::AttributeAccessor b_attributes = b_mesh.attributes();
   AttributeSet &attributes = (subdivision) ? mesh->subd_attributes : mesh->attributes;
   static const ustring u_velocity("velocity");
+  static const ustring u_ocean_ref_coord("ocean_ref_coord");
+  static const ustring u_ocean_ref_uv("ocean_ref_uv");
+  static const ustring u_ocean_geometry_normal("ocean_geometry_normal");
+  static const ustring u_ocean_geometry_support_covariance("ocean_geometry_support_covariance");
   const ustring default_color_name{
       std::string_view(BKE_id_attributes_default_color_name(&b_mesh.id).value_or(""))};
 
   b_attributes.foreach_attribute([&](const blender::bke::AttributeIter &iter) {
     const ustring name{std::string_view(iter.name)};
     const bool is_render_color = name == default_color_name;
+    const bool is_ocean_ref_coord = (name == u_ocean_ref_coord);
+    const bool is_ocean_ref_uv = (name == u_ocean_ref_uv);
+    const bool is_ocean_geometry_normal = (name == u_ocean_geometry_normal);
+    const bool is_ocean_geometry_support_covariance = (name == u_ocean_geometry_support_covariance);
 
     if (need_motion && name == u_velocity) {
       const blender::VArraySpan b_attribute = *iter.get<blender::float3>(
@@ -120,6 +441,12 @@ static void attr_create_generic(Scene *scene,
     }
 
     if (!(mesh->need_attribute(scene, name) ||
+          (is_ocean_ref_coord && mesh->need_attribute(scene, ATTR_STD_OCEAN_REF_COORD)) ||
+          (is_ocean_ref_uv && mesh->need_attribute(scene, ATTR_STD_OCEAN_REF_UV)) ||
+          (is_ocean_geometry_normal &&
+           mesh->need_attribute(scene, ATTR_STD_OCEAN_GEOMETRY_NORMAL)) ||
+          (is_ocean_geometry_support_covariance &&
+           mesh->need_attribute(scene, ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE)) ||
           (is_render_color && mesh->need_attribute(scene, ATTR_STD_VERTEX_COLOR))))
     {
       return;
@@ -188,6 +515,21 @@ static void attr_create_generic(Scene *scene,
         Attribute *attr = attributes.add(name, Converter::type_desc, element);
         if (is_render_color) {
           attr->std = ATTR_STD_VERTEX_COLOR;
+        }
+        else if (is_ocean_ref_coord) {
+          attr->std = ATTR_STD_OCEAN_REF_COORD;
+        }
+        else if (is_ocean_ref_uv) {
+          attr->std = ATTR_STD_OCEAN_REF_UV;
+          if (subdivision) {
+            attr->flags |= ATTR_SUBDIVIDE_SMOOTH_FVAR;
+          }
+        }
+        else if (is_ocean_geometry_normal) {
+          attr->std = ATTR_STD_OCEAN_GEOMETRY_NORMAL;
+        }
+        else if (is_ocean_geometry_support_covariance) {
+          attr->std = ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE;
         }
 
         CyclesT *data = reinterpret_cast<CyclesT *>(attr->data());
@@ -888,6 +1230,18 @@ static void create_subd_mesh(Scene *scene,
 
 void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 {
+  const ::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
+  const bool profile_ocean = ocean_camera_lod_profile_enabled() && ocean_omd != nullptr;
+  const string object_name = b_ob_info.real_object.name();
+  const double sync_start = profile_ocean ? time_dt() : 0.0;
+  double object_to_mesh_s = 0.0;
+  double create_mesh_s = 0.0;
+  double free_object_to_mesh_s = 0.0;
+  double clear_non_sockets_s = 0.0;
+  double sync_split_resources_s = 0.0;
+  double tag_update_s = 0.0;
+  int source_verts = 0;
+
   /* make a copy of the shaders as the caller in the main thread still need them for syncing the
    * attributes */
   array<Node *> used_shaders = mesh->get_used_shaders();
@@ -898,9 +1252,14 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
   if (view_layer.use_surfaces) {
     object_subdivision_to_mesh(
         *b_ob_info.real_object, new_mesh, preview, use_adaptive_subdivision);
+    const double object_to_mesh_start = profile_ocean ? time_dt() : 0.0;
     const blender::Mesh *b_mesh = object_to_mesh(b_ob_info);
+    if (profile_ocean) {
+      object_to_mesh_s = time_dt() - object_to_mesh_start;
+    }
 
     if (b_mesh) {
+      source_verts = b_mesh->verts_num;
       /* Motion blur attribute is relative to seconds, we need it relative to frames. */
       const bool need_motion = object_need_motion_attribute(b_ob_info, scene);
       const float motion_scale = (need_motion) ?
@@ -909,6 +1268,7 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
                                      0.0f;
 
       /* Sync mesh itself. */
+      const double create_mesh_start = profile_ocean ? time_dt() : 0.0;
       if (new_mesh.get_subdivision_type() != Mesh::SUBDIVISION_NONE) {
         create_subd_mesh(scene,
                          &new_mesh,
@@ -929,14 +1289,28 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
                     motion_scale,
                     false);
       }
+      if (profile_ocean) {
+        create_mesh_s = time_dt() - create_mesh_start;
+      }
 
+      const double free_object_to_mesh_start = profile_ocean ? time_dt() : 0.0;
       free_object_to_mesh(b_ob_info, const_cast<blender::Mesh &>(*b_mesh));
+      if (profile_ocean) {
+        free_object_to_mesh_s = time_dt() - free_object_to_mesh_start;
+      }
     }
   }
 
   /* update original sockets */
 
+  const double clear_non_sockets_start = profile_ocean ? time_dt() : 0.0;
   mesh->clear_non_sockets();
+  mesh->ocean_modifier_active = (ocean_omd != nullptr);
+  mesh->ocean_camera_lod_active = (ocean_omd != nullptr &&
+                                   (ocean_omd->flag & MOD_OCEAN_USE_CAMERA_LOD) != 0);
+  if (profile_ocean) {
+    clear_non_sockets_s = time_dt() - clear_non_sockets_start;
+  }
 
   for (const SocketType &socket : new_mesh.type->inputs) {
     /* Those sockets are updated in sync_object, so do not modify them. */
@@ -948,6 +1322,11 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 
   mesh->attributes.update(std::move(new_mesh.attributes));
   mesh->subd_attributes.update(std::move(new_mesh.subd_attributes));
+  const double sync_split_resources_start = profile_ocean ? time_dt() : 0.0;
+  sync_ocean_split_resources(scene, b_ob_info, mesh);
+  if (profile_ocean) {
+    sync_split_resources_s = time_dt() - sync_split_resources_start;
+  }
 
   mesh->set_num_subd_faces(new_mesh.get_num_subd_faces());
 
@@ -958,7 +1337,30 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
                        (mesh->subd_start_corner_is_modified()) ||
                        (mesh->subd_face_corners_is_modified());
 
+  const double tag_update_start = profile_ocean ? time_dt() : 0.0;
   mesh->tag_update(scene, rebuild);
+  if (profile_ocean) {
+    tag_update_s = time_dt() - tag_update_start;
+    ocean_camera_lod_profile_logf(
+        object_name.c_str(),
+        "cycles_sync_mesh",
+        "mode=%s total_s=%.6f object_to_mesh_s=%.6f create_mesh_s=%.6f "
+        "free_object_to_mesh_s=%.6f clear_non_sockets_s=%.6f sync_split_resources_s=%.6f "
+        "tag_update_s=%.6f source_verts=%d synced_verts=%zu synced_tris=%zu split_levels=%zu rebuild=%d",
+        mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference",
+        time_dt() - sync_start,
+        object_to_mesh_s,
+        create_mesh_s,
+        free_object_to_mesh_s,
+        clear_non_sockets_s,
+        sync_split_resources_s,
+        tag_update_s,
+        source_verts,
+        mesh->get_verts().size(),
+        mesh->num_triangles(),
+        mesh->ocean_split_slope_images.size(),
+        int(rebuild));
+  }
 }
 
 void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int motion_step)
@@ -969,6 +1371,9 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
   if (numverts == 0) {
     return;
   }
+
+  const ::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
+  const bool need_ocean_motion_resources = ocean_omd != nullptr;
 
   /* Skip objects without deforming modifiers. this is not totally reliable,
    * would need a more extensive check to see which objects are animated. */
@@ -1054,16 +1459,31 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
       /* In case of new attribute, we verify if there really was any motion. */
       if (topology_changed || memcmp(mP, mesh->get_verts().data(), sizeof(float3) * numverts) == 0)
       {
-        /* no motion, remove attributes again */
-        if (topology_changed) {
-          LOG_WARNING << "Topology differs, disabling motion blur for object " << ob_name;
+        if (need_ocean_motion_resources && b_verts_num == numverts) {
+          if (motion_step > 0) {
+            const float3 *P = mesh->get_verts().data();
+            const packed_normal *N = (attr_N) ? attr_N->data_normal() : nullptr;
+            for (int step = 0; step < motion_step; step++) {
+              std::copy_n(P, numverts, attr_mP->data_float3() + step * numverts);
+              if (attr_mN && N != nullptr) {
+                std::copy_n(N, numverts, attr_mN->data_normal() + step * numverts);
+              }
+            }
+          }
+        }
+        else if (b_verts_num != numverts) {
+          VLOG_WARNING << "Topology differs, disabling motion blur for object " << ob_name;
+          attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
+          if (attr_mN) {
+            attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
+          }
         }
         else {
-          LOG_TRACE << "No actual deformation motion for object " << ob_name;
-        }
-        attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
-        if (attr_mN) {
-          attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
+          VLOG_DEBUG << "No actual deformation motion for object " << ob_name;
+          attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
+          if (attr_mN) {
+            attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
+          }
         }
         if (attr_mcN) {
           attributes.remove(ATTR_STD_MOTION_CORNER_NORMAL);
@@ -1105,11 +1525,58 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
     }
 
     free_object_to_mesh(b_ob_info, *const_cast<blender::Mesh *>(b_mesh));
-    return;
   }
 
-  /* No deformation on this frame, copy coordinates if other frames did have it. */
-  mesh->copy_center_to_motion_step(motion_step);
+  if (!b_mesh) {
+    AttributeSet &attributes = mesh->get_subdivision_type() == Mesh::SUBDIVISION_NONE ?
+                                   mesh->attributes :
+                                   mesh->subd_attributes;
+    if (need_ocean_motion_resources && !attributes.find(ATTR_STD_MOTION_VERTEX_POSITION)) {
+      Attribute *attr_mP = attributes.add(ATTR_STD_MOTION_VERTEX_POSITION);
+      Attribute *attr_N = attributes.find(ATTR_STD_VERTEX_NORMAL);
+      Attribute *attr_mN = (attr_N != nullptr) ? attributes.add(ATTR_STD_MOTION_VERTEX_NORMAL) :
+                                                 nullptr;
+      const float3 *P = mesh->get_verts().data();
+      const packed_normal *N = (attr_N != nullptr) ? attr_N->data_normal() : nullptr;
+      for (int step = 0; step < mesh->get_motion_steps() - 1; step++) {
+        std::copy_n(P, numverts, attr_mP->data_float3() + step * numverts);
+        if (attr_mN != nullptr && N != nullptr) {
+          std::copy_n(N, numverts, attr_mN->data_normal() + step * numverts);
+        }
+      }
+    }
+
+    /* No deformation on this frame, copy coordinates if other frames did have it. */
+    mesh->copy_center_to_motion_step(motion_step);
+  }
+
+  if (need_ocean_motion_resources) {
+    const ::OceanModifierData *omd = ocean_omd;
+    if (omd != nullptr) {
+      if (motion_step == 0) {
+        sync_ocean_split_runtime_step_resources(scene,
+                                                omd,
+                                                &mesh->ocean_split_slope_images_pre,
+                                                &mesh->ocean_split_cumulative_slope_moments_pre,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr);
+      }
+      if (motion_step == mesh->get_motion_steps() - 2) {
+        sync_ocean_split_runtime_step_resources(scene,
+                                                omd,
+                                                &mesh->ocean_split_slope_images_post,
+                                                &mesh->ocean_split_cumulative_slope_moments_post,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr,
+                                                nullptr);
+      }
+    }
+  }
 }
 
 CCL_NAMESPACE_END

@@ -1436,6 +1436,14 @@ static void rna_OceanModifier_init_update(Main *bmain, Scene *scene, PointerRNA 
   rna_Modifier_update(bmain, scene, ptr);
 }
 
+static void rna_OceanModifier_init_dependency_update(Main *bmain, Scene *scene, PointerRNA *ptr)
+{
+  OceanModifierData *omd = (OceanModifierData *)ptr->data;
+
+  BKE_ocean_free_modifier_cache(omd);
+  rna_Modifier_dependency_update(bmain, scene, ptr);
+}
+
 static void rna_OceanModifier_ocean_chop_set(PointerRNA *ptr, float value)
 {
   OceanModifierData *omd = static_cast<OceanModifierData *>(ptr->data);
@@ -6478,6 +6486,36 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
       {0, nullptr, 0, nullptr, nullptr},
   };
 
+  static const EnumPropertyItem lod_validation_mode_items[] = {
+      {MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE,
+       "CAMERA_OBSERVABLE",
+       0,
+       "Camera Observable",
+       "Bound current camera-conditioned reprojection, depth, geometric normal, temporal, "
+       "grazing, and buffered near-view position error against the dense same-state reference"},
+      {MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT,
+       "GEOMETRY_STRICT",
+       0,
+       "Geometry Strict",
+      "Also require a hard buffered world-space position match over the current camera-relevant "
+       "footprint; coarse regions remain dense when geometry-faithfulness requires it"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+  static const EnumPropertyItem lod_usage_mode_items[] = {
+      {MOD_OCEAN_LOD_USAGE_GENERAL_RENDER,
+       "GENERAL_RENDER",
+       0,
+       "General Render",
+       "Beauty-oriented camera LOD with residual same-state shading detail available in Cycles"},
+      {MOD_OCEAN_LOD_USAGE_STEREO_DATASET,
+       "STEREO_DATASET",
+       0,
+       "Stereo Dataset",
+       "Geometry-first stereo-pair mode that validates one explicit mesh against the stereo union "
+       "and disables residual shading detail"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
+
   srna = RNA_def_struct(brna, "OceanModifier", "Modifier");
   RNA_def_struct_ui_text(srna, "Ocean Modifier", "Simulate an ocean surface");
   RNA_def_struct_sdna(srna, "OceanModifierData");
@@ -6489,7 +6527,7 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_enum_sdna(prop, nullptr, "geometry_mode");
   RNA_def_property_enum_items(prop, geometry_items);
   RNA_def_property_ui_text(prop, "Geometry", "Method of modifying geometry");
-  RNA_def_property_update(prop, 0, "rna_Modifier_update");
+  RNA_def_property_update(prop, 0, "rna_Modifier_dependency_update");
 
   prop = RNA_def_property(srna, "size", PROP_FLOAT, PROP_UNSIGNED);
   RNA_def_property_float_sdna(prop, nullptr, "size");
@@ -6522,6 +6560,67 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
       "Generate Normals",
       "Output normals for bump mapping - disabling can speed up performance if it's not needed");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "use_camera_lod", PROP_BOOLEAN, PROP_NONE);
+  RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_USE_CAMERA_LOD);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "Camera LOD",
+      "Use a camera-anchored adaptive ocean LOD path with filtered full-spectrum Cycles shading");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_levels", PROP_INT, PROP_UNSIGNED);
+  RNA_def_property_int_sdna(prop, nullptr, "lod_levels");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 1, 16);
+  RNA_def_property_ui_range(prop, 1, 12, 1, -1);
+  RNA_def_property_ui_text(
+      prop, "LOD Levels", "Maximum adaptive quadtree depth for camera-anchored ocean LOD");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_pixel_error", PROP_FLOAT, PROP_UNSIGNED);
+  RNA_def_property_float_sdna(prop, nullptr, "lod_pixel_error");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0.01f, 16.0f);
+  RNA_def_property_ui_range(prop, 0.1f, 2.0f, 0.1f, 2);
+  RNA_def_property_ui_text(
+      prop,
+      "LOD Pixel Error",
+      "Screen-space geometry tolerance in pixels for adaptive camera LOD leaf selection");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_camera_full_spectrum_radius", PROP_FLOAT, PROP_DISTANCE);
+  RNA_def_property_float_sdna(prop, nullptr, "lod_camera_full_spectrum_radius");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0.0f, FLT_MAX);
+  RNA_def_property_ui_range(prop, 0.0f, 100.0f, 1.0f, 2);
+  RNA_def_property_ui_text(prop,
+                           "LOD Camera Full Spectrum Radius",
+                           "Object-space radius around the camera XY anchor that is forced to "
+                           "full-spectrum split level 0; zero uses an automatic dense-cell radius");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_usage_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "lod_usage_mode");
+  RNA_def_property_enum_items(prop, lod_usage_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(prop,
+                           "LOD Usage",
+                           "Choose between the general render path and a geometry-first stereo "
+                           "dataset path");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_validation_mode", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "lod_validation_mode");
+  RNA_def_property_enum_items(prop, lod_validation_mode_items);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop,
+      "LOD Validity",
+      "Choose whether camera LOD is validated only against current camera observables or also "
+      "against buffered world-space position over the current camera-relevant footprint");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
 
   prop = RNA_def_property(srna, "use_foam", PROP_BOOLEAN, PROP_NONE);
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_GENERATE_FOAM);

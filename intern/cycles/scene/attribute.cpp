@@ -402,6 +402,18 @@ const char *Attribute::standard_name(AttributeStandard std)
       return "random_per_island";
     case ATTR_STD_SHADOW_TRANSPARENCY:
       return "shadow_transparency";
+    case ATTR_STD_OCEAN_REF_COORD:
+      return "ocean_ref_coord";
+    case ATTR_STD_OCEAN_REF_UV:
+      return "ocean_ref_uv";
+    case ATTR_STD_OCEAN_GEOMETRY_NORMAL:
+      return "ocean_geometry_normal";
+    case ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE:
+      return "ocean_geometry_support_covariance";
+    case ATTR_STD_OCEAN_VISIBLE_RESIDUAL_SLOPE:
+      return "ocean_residual_slope";
+    case ATTR_STD_OCEAN_UNRESOLVED_SLOPE_COVARIANCE:
+      return "ocean_unresolved_slope_covariance";
     case ATTR_STD_NOT_FOUND:
     case ATTR_STD_NONE:
     case ATTR_STD_NUM:
@@ -599,6 +611,24 @@ Attribute *AttributeSet::add(AttributeStandard std, ustring name)
         break;
       case ATTR_STD_RANDOM_PER_ISLAND:
         attr = add(name, TypeFloat, ATTR_ELEMENT_FACE);
+        break;
+      case ATTR_STD_OCEAN_REF_COORD:
+        attr = add(name, TypeVector, ATTR_ELEMENT_VERTEX);
+        break;
+      case ATTR_STD_OCEAN_REF_UV:
+        attr = add(name, TypeFloat2, ATTR_ELEMENT_CORNER);
+        break;
+      case ATTR_STD_OCEAN_GEOMETRY_NORMAL:
+        attr = add(name, TypeVector, ATTR_ELEMENT_VERTEX);
+        break;
+      case ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE:
+        attr = add(name, TypeVector, ATTR_ELEMENT_VERTEX);
+        break;
+      case ATTR_STD_OCEAN_VISIBLE_RESIDUAL_SLOPE:
+        attr = add(name, TypeFloat2, ATTR_ELEMENT_VERTEX);
+        break;
+      case ATTR_STD_OCEAN_UNRESOLVED_SLOPE_COVARIANCE:
+        attr = add(name, TypeVector, ATTR_ELEMENT_VERTEX);
         break;
       default:
         assert(0);

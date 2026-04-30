@@ -12,6 +12,7 @@
 
 #include "BLI_kdopbvh.hh"
 #include "BLI_math_geom.h"
+#include "BLI_math_matrix.h"
 
 #include "RNA_define.hh"
 
@@ -54,6 +55,7 @@ static const EnumPropertyItem space_items[] = {
 #  include "BKE_camera.h"
 #  include "BKE_constraint.h"
 #  include "BKE_context.hh"
+#  include "BKE_camera.h"
 #  include "BKE_crazyspace.hh"
 #  include "BKE_customdata.hh"
 #  include "BKE_global.hh"
@@ -67,6 +69,7 @@ static const EnumPropertyItem space_items[] = {
 #  include "BKE_object.hh"
 #  include "BKE_object_types.hh"
 #  include "BKE_report.hh"
+#  include "BKE_scene.hh"
 #  include "BKE_vfont.hh"
 
 #  include "ED_object.hh"
@@ -351,26 +354,95 @@ static void rna_Object_mat_convert_space(Object *ob,
       ob, pchan, nullptr, reinterpret_cast<float (*)[4]>(mat_ret), from, to, false);
 }
 
+static bool rna_Object_multiview_render_view_validate(ReportList *reports,
+                                                      const Scene *scene,
+                                                      const char *view_name)
+{
+  BLI_assert(view_name != nullptr);
+  BLI_assert(view_name[0] != '\0');
+
+  if (scene == nullptr) {
+    BKE_report(reports, RPT_ERROR, "scene is required when view_name is set");
+    return false;
+  }
+  if ((scene->r.scemode & R_MULTIVIEW) == 0) {
+    BKE_reportf(
+        reports, RPT_ERROR, "view '%s' requires scene.render.use_multiview to be enabled", view_name);
+    return false;
+  }
+
+  const SceneRenderView *render_view = nullptr;
+  LISTBASE_FOREACH (const SceneRenderView *, srv, &scene->r.views) {
+    if (STREQ(srv->name, view_name)) {
+      render_view = srv;
+      break;
+    }
+  }
+  if (render_view == nullptr) {
+    BKE_reportf(reports, RPT_ERROR, "unknown render view '%s'", view_name);
+    return false;
+  }
+  if (!BKE_scene_multiview_is_render_view_active(&scene->r, render_view)) {
+    BKE_reportf(reports, RPT_ERROR, "render view '%s' is inactive", view_name);
+    return false;
+  }
+
+  return true;
+}
+
 static void rna_Object_calc_matrix_camera(Object *ob,
+                                          ReportList *reports,
                                           Depsgraph *depsgraph,
                                           float mat_ret[16],
                                           int width,
                                           int height,
                                           float scalex,
-                                          float scaley)
+                                          float scaley,
+                                          PointerRNA *scene_ptr,
+                                          const char *view_name)
 {
   const Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  Scene *scene = (scene_ptr != nullptr) ? static_cast<Scene *>(scene_ptr->data) : nullptr;
   CameraParams params;
 
   /* setup parameters */
   BKE_camera_params_init(&params);
   BKE_camera_params_from_object(&params, ob_eval);
+  if (view_name && view_name[0] != '\0') {
+    if (!rna_Object_multiview_render_view_validate(reports, scene, view_name)) {
+      return;
+    }
+
+    BKE_camera_multiview_params(&scene->r, &params, ob_eval, view_name);
+  }
 
   /* Compute matrix, view-plane, etc. */
   BKE_camera_params_compute_viewplane(&params, width, height, scalex, scaley);
   BKE_camera_params_compute_matrix(&params);
 
   copy_m4_m4(reinterpret_cast<float (*)[4]>(mat_ret), params.winmat);
+}
+
+static void rna_Object_calc_matrix_camera_model(Object *ob,
+                                                ReportList *reports,
+                                                Depsgraph *depsgraph,
+                                                float mat_ret[16],
+                                                PointerRNA *scene_ptr,
+                                                const char *view_name)
+{
+  const Object *ob_eval = DEG_get_evaluated(depsgraph, ob);
+  Scene *scene = (scene_ptr != nullptr) ? static_cast<Scene *>(scene_ptr->data) : nullptr;
+
+  if (view_name && view_name[0] != '\0') {
+    if (!rna_Object_multiview_render_view_validate(reports, scene, view_name)) {
+      return;
+    }
+  }
+  BKE_camera_multiview_model_matrix(
+      (scene != nullptr && view_name && view_name[0] != '\0') ? &scene->r : nullptr,
+      ob_eval,
+      view_name,
+      (float(*)[4])mat_ret);
 }
 
 static void rna_Object_camera_fit_coords(Object *ob,
@@ -982,6 +1054,7 @@ void RNA_api_object(StructRNA *srna)
 
   /* Camera-related operations */
   func = RNA_def_function(srna, "calc_matrix_camera", "rna_Object_calc_matrix_camera");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
   RNA_def_function_ui_description(func,
                                   "Generate the camera projection matrix of this object "
                                   "(mostly useful for Camera and Light types)");
@@ -998,6 +1071,31 @@ void RNA_api_object(StructRNA *srna)
       func, "scale_x", 1.0f, 1.0e-6f, FLT_MAX, "", "Width scaling factor", 1.0e-2f, 100.0f);
   parm = RNA_def_float(
       func, "scale_y", 1.0f, 1.0e-6f, FLT_MAX, "", "Height scaling factor", 1.0e-2f, 100.0f);
+  parm = RNA_def_pointer(
+      func, "scene", "Scene", "", "Scene providing multiview render settings for stereo views");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(
+      func, "view_name", nullptr, MAX_NAME, "View Name", "Render view name to evaluate");
+
+  func = RNA_def_function(
+      srna, "calc_matrix_camera_model", "rna_Object_calc_matrix_camera_model");
+  RNA_def_function_flag(func, FUNC_USE_REPORTS);
+  RNA_def_function_ui_description(
+      func,
+      "Generate the evaluated camera model matrix used by calc_matrix_camera(), or a stereo-eye "
+      "variant when scene and view_name are provided");
+  parm = RNA_def_pointer(
+      func, "depsgraph", "Depsgraph", "", "Depsgraph to get evaluated data from");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_REQUIRED);
+  parm = RNA_def_property(func, "result", PROP_FLOAT, PROP_MATRIX);
+  RNA_def_property_multi_array(parm, 2, rna_matrix_dimsize_4x4);
+  RNA_def_property_ui_text(parm, "", "The evaluated camera model matrix");
+  RNA_def_function_output(func, parm);
+  parm = RNA_def_pointer(
+      func, "scene", "Scene", "", "Scene providing multiview render settings for stereo views");
+  RNA_def_parameter_flags(parm, PropertyFlag(0), PARM_RNAPTR);
+  RNA_def_string(
+      func, "view_name", nullptr, MAX_NAME, "View Name", "Render view name to evaluate");
 
   func = RNA_def_function(srna, "camera_fit_coords", "rna_Object_camera_fit_coords");
   RNA_def_function_ui_description(func,

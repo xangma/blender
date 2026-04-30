@@ -8,6 +8,8 @@
  * \ingroup bke
  */
 
+#include <stdint.h>
+
 #ifdef WITH_OCEANSIM
 #  include "BLI_threads.h"
 #  include "fftw3.h"
@@ -17,6 +19,27 @@ namespace blender {
 
 #ifdef WITH_OCEANSIM
 #  define GRAVITY 9.81f
+
+struct OceanSplitLevel {
+  int size_x;
+  int size_y;
+  float wavelength;
+  float *disp_x;
+  float *disp_y;
+  float *disp_z;
+  float *normal_x;
+  float *normal_y;
+  float *normal_z;
+  /**
+   * Reduced-resolution inverse FFT scratch for cumulative split reconstruction.
+   * Level 0 reuses the main simulation buffers and keeps these null.
+   */
+  fftw_complex *fft_in;
+  double *fft_out;
+  fftw_plan fft_plan;
+  float cumulative_disp_variance[3];
+  float cumulative_slope_moment[3];
+};
 
 struct Ocean {
   /* ********* input parameters to the sim ********* */
@@ -50,6 +73,7 @@ struct Ocean {
   short _do_spray;
   short _do_chop;
   short _do_jacobian;
+  short _do_split;
 
   /* Which spectral model we are using. */
   int _spectrum;
@@ -122,6 +146,10 @@ struct Ocean {
 
   /* two dimensional float array */
   float *_k; /* init w   sim r */
+
+  int _split_levels_num;
+  OceanSplitLevel *_split_levels;
+  uint64_t _split_runtime_revision;
 };
 #else
 /* stub */
