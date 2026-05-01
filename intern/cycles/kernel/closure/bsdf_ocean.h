@@ -238,7 +238,7 @@ ccl_device_inline bool ocean_split_geometry_normal_canonical(
     return false;
   }
 
-  const float3 normal = primitive_surface_attribute<float3>(kg, sd, desc, nullptr, nullptr);
+  const float3 normal = primitive_surface_attribute<float3>(kg, sd, desc).val;
   if (is_zero(normal)) {
     return false;
   }
@@ -282,7 +282,15 @@ ccl_device_inline bool ocean_split_ref_coord(KernelGlobals kg,
     return false;
   }
 
-  *r_ref_coord = primitive_surface_attribute<float3>(kg, sd, desc, r_drefdx, r_drefdy);
+  const dual3 ref_coord = primitive_surface_attribute<float3>(
+      kg, sd, desc, r_drefdx != nullptr, r_drefdy != nullptr);
+  *r_ref_coord = ref_coord.val;
+  if (r_drefdx != nullptr) {
+    *r_drefdx = ref_coord.dx;
+  }
+  if (r_drefdy != nullptr) {
+    *r_drefdy = ref_coord.dy;
+  }
   return true;
 }
 
@@ -295,7 +303,7 @@ ccl_device_inline bool ocean_split_ref_uv(KernelGlobals kg,
     return false;
   }
 
-  *r_ref_uv = primitive_surface_attribute<float2>(kg, sd, desc, nullptr, nullptr);
+  *r_ref_uv = primitive_surface_attribute<float2>(kg, sd, desc).val;
   return true;
 }
 
@@ -307,7 +315,7 @@ ccl_device_inline bool ocean_split_geometry_support_covariance(
     return false;
   }
 
-  const float3 covariance = primitive_surface_attribute<float3>(kg, sd, desc, nullptr, nullptr);
+  const float3 covariance = primitive_surface_attribute<float3>(kg, sd, desc).val;
   *r_covariance = ocean_split_covariance_project_psd(
       make_float3(fmaxf(covariance.x, 0.0f), covariance.y, fmaxf(covariance.z, 0.0f)));
   return true;
@@ -396,14 +404,14 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
   float minor_variance, major_variance;
   ocean_split_covariance_eigenvalues(texel_covariance, &minor_variance, &major_variance);
   if (major_variance <= 1.0e-8f) {
-    const float4 sample = kernel_tex_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
   const float determinant = texel_covariance.x * texel_covariance.z -
                             texel_covariance.y * texel_covariance.y;
   if (determinant <= 1.0e-10f) {
-    const float4 sample = kernel_tex_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
@@ -422,7 +430,7 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
                                          sqrtf(fmaxf(texel_covariance.z, 0.0f))))));
 
   if (radius_x == 0 && radius_y == 0) {
-    const float4 sample = kernel_tex_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
@@ -446,14 +454,14 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
 
       const float sample_u = uv.x + (float(offset_x) / float(max(1, resolution_x)));
       const float sample_v = uv.y + (float(offset_y) / float(max(1, resolution_y)));
-      const float4 sample = kernel_tex_image_interp(kg, slot, sample_u, sample_v);
+      const float4 sample = kernel_image_interp(kg, slot, sample_u, sample_v);
       value_sum += weight * ocean_split_normal_sample_to_slope(sample);
       weight_sum += weight;
     }
   }
 
   if (weight_sum <= 1.0e-8f) {
-    const float4 sample = kernel_tex_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
   return value_sum / weight_sum;
