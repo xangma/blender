@@ -18,6 +18,8 @@
 
 #include "kernel/globals.h"
 
+#include "kernel/device/cpu/image.h"
+
 #include "kernel/geom/attribute.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/primitive.h"

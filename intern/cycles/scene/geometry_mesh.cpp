@@ -115,14 +115,14 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
         }
 
         if (profile_mesh) {
-          VLOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='" << mesh->name
-                    << "' stage=cycles_device_update_mesh_pack mode="
-                    << (mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference")
-                    << " pack_s=" << (time_dt() - mesh_pack_start) << " verts="
-                    << mesh->verts.size() << " tris=" << mesh->num_triangles() << " copy_all="
-                    << int(copy_all_data) << " verts_modified=" << int(mesh->verts_is_modified())
-                    << " triangles_modified=" << int(mesh->triangles_is_modified())
-                    << " shader_modified=" << int(mesh->shader_is_modified());
+          LOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='" << mesh->name
+                   << "' stage=cycles_device_update_mesh_pack mode="
+                   << (mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference")
+                   << " pack_s=" << (time_dt() - mesh_pack_start) << " verts="
+                   << mesh->verts.size() << " tris=" << mesh->num_triangles() << " copy_all="
+                   << int(copy_all_data) << " verts_modified=" << int(mesh->verts_is_modified())
+                   << " triangles_modified=" << int(mesh->triangles_is_modified())
+                   << " shader_modified=" << int(mesh->shader_is_modified());
         }
       }
     }
@@ -136,12 +136,12 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
     dscene->tri_vindex.copy_to_device_if_modified();
 
     if (profile_enabled && ocean_mesh_count > 0) {
-      VLOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='scene' stage=cycles_device_update_mesh total_s="
-                << (time_dt() - stage_start) << " pack_s=" << (time_dt() - pack_start)
-                << " copy_to_device_s=" << (time_dt() - copy_to_device_start)
-                << " ocean_meshes=" << ocean_mesh_count << " ocean_verts=" << ocean_vert_size
-                << " ocean_tris=" << ocean_tri_size << " scene_verts=" << vert_size
-                << " scene_tris=" << tri_size;
+      LOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='scene' stage=cycles_device_update_mesh total_s="
+               << (time_dt() - stage_start) << " pack_s=" << (time_dt() - pack_start)
+               << " copy_to_device_s=" << (time_dt() - copy_to_device_start)
+               << " ocean_meshes=" << ocean_mesh_count << " ocean_verts=" << ocean_vert_size
+               << " ocean_tris=" << ocean_tri_size << " scene_verts=" << vert_size
+               << " scene_tris=" << tri_size;
     }
   }
 

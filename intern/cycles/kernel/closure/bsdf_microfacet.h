@@ -1098,7 +1098,8 @@ ccl_device Spectrum bsdf_ocean_unresolved_reflection_eval(KernelGlobals kg,
                                                           const float3 wo,
                                                           ccl_private float *pdf)
 {
-  return bsdf_microfacet_eval<MicrofacetType::BECKMANN>(kg, sc, Ng, wi, wo, pdf);
+  (void)Ng;
+  return bsdf_microfacet_eval<MicrofacetType::BECKMANN>(kg, sc, wi, wo, pdf);
 }
 
 ccl_device int bsdf_microfacet_beckmann_sample(KernelGlobals kg,
