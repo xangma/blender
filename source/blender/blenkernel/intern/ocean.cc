@@ -119,7 +119,7 @@ static float realsea_spread_integral(const float s, const float dvar, const int 
 static void ocean_realsea_build_spread_lut(Ocean *o)
 {
   if (o->_realsea_spread_lut) {
-    MEM_freeN(o->_realsea_spread_lut);
+    MEM_delete(o->_realsea_spread_lut);
     o->_realsea_spread_lut = nullptr;
   }
 
@@ -127,7 +127,7 @@ static void ocean_realsea_build_spread_lut(Ocean *o)
   constexpr int samples = 180;
   o->_realsea_lut_size = lut_size;
 
-  o->_realsea_spread_lut = MEM_malloc_arrayN<float>(lut_size, "realsea spread lut");
+  o->_realsea_spread_lut = MEM_new_array_uninitialized<float>(lut_size, "realsea spread lut");
   const float s_max = std::max(o->_realsea_sp, 0.0f);
   o->_realsea_s_max = s_max;
 
@@ -260,14 +260,14 @@ static void ocean_split_level_free(OceanSplitLevel *level)
     level->fft_plan = nullptr;
   }
 
-  MEM_SAFE_FREE(level->fft_in);
-  MEM_SAFE_FREE(level->fft_out);
-  MEM_SAFE_FREE(level->disp_x);
-  MEM_SAFE_FREE(level->disp_y);
-  MEM_SAFE_FREE(level->disp_z);
-  MEM_SAFE_FREE(level->normal_x);
-  MEM_SAFE_FREE(level->normal_y);
-  MEM_SAFE_FREE(level->normal_z);
+  MEM_SAFE_DELETE(level->fft_in);
+  MEM_SAFE_DELETE(level->fft_out);
+  MEM_SAFE_DELETE(level->disp_x);
+  MEM_SAFE_DELETE(level->disp_y);
+  MEM_SAFE_DELETE(level->disp_z);
+  MEM_SAFE_DELETE(level->normal_x);
+  MEM_SAFE_DELETE(level->normal_y);
+  MEM_SAFE_DELETE(level->normal_z);
   level->size_x = 0;
   level->size_y = 0;
   level->wavelength = 0.0f;
@@ -285,7 +285,7 @@ static void ocean_free_split_data(Ocean *o)
     ocean_split_level_free(&o->_split_levels[level_index]);
   }
 
-  MEM_SAFE_FREE(o->_split_levels);
+  MEM_SAFE_DELETE(o->_split_levels);
   o->_split_levels_num = 0;
 }
 
@@ -306,12 +306,12 @@ static bool ocean_split_level_alloc(OceanSplitLevel *level,
   zero_v3(level->cumulative_slope_moment);
 
   const size_t size = size_t(size_x) * size_t(size_y);
-  level->disp_x = MEM_calloc_arrayN<float>(size, "ocean_split_disp_x");
-  level->disp_y = MEM_calloc_arrayN<float>(size, "ocean_split_disp_y");
-  level->disp_z = MEM_calloc_arrayN<float>(size, "ocean_split_disp_z");
-  level->normal_x = MEM_calloc_arrayN<float>(size, "ocean_split_normal_x");
-  level->normal_y = MEM_calloc_arrayN<float>(size, "ocean_split_normal_y");
-  level->normal_z = MEM_calloc_arrayN<float>(size, "ocean_split_normal_z");
+  level->disp_x = MEM_new_array_zeroed<float>(size, "ocean_split_disp_x");
+  level->disp_y = MEM_new_array_zeroed<float>(size, "ocean_split_disp_y");
+  level->disp_z = MEM_new_array_zeroed<float>(size, "ocean_split_disp_z");
+  level->normal_x = MEM_new_array_zeroed<float>(size, "ocean_split_normal_x");
+  level->normal_y = MEM_new_array_zeroed<float>(size, "ocean_split_normal_y");
+  level->normal_z = MEM_new_array_zeroed<float>(size, "ocean_split_normal_z");
 
   if (!(level->disp_x && level->disp_y && level->disp_z && level->normal_x && level->normal_y &&
         level->normal_z))
@@ -321,9 +321,9 @@ static bool ocean_split_level_alloc(OceanSplitLevel *level,
   }
 
   if (needs_fft_plan) {
-    level->fft_in = MEM_malloc_arrayN<fftw_complex>(
+    level->fft_in = MEM_new_array_uninitialized<fftw_complex>(
         size_t(size_x) * (1 + size_t(size_y) / 2), "ocean_split_fft_in");
-    level->fft_out = MEM_malloc_arrayN<double>(size, "ocean_split_fft_out");
+    level->fft_out = MEM_new_array_uninitialized<double>(size, "ocean_split_fft_out");
     if (!(level->fft_in && level->fft_out)) {
       ocean_split_level_free(level);
       return false;
@@ -379,7 +379,8 @@ static bool ocean_ensure_split_levels(Ocean *o)
   }
 
   const int levels_num = ocean_split_level_count(o->_M, o->_N);
-  o->_split_levels = MEM_calloc_arrayN<OceanSplitLevel>(size_t(levels_num), "ocean_split_levels");
+  o->_split_levels = MEM_new_array_zeroed<OceanSplitLevel>(size_t(levels_num),
+                                                           "ocean_split_levels");
   if (!o->_split_levels) {
     return false;
   }
@@ -2300,7 +2301,7 @@ void BKE_ocean_free_data(Ocean *oc)
   }
 
   if (oc->_realsea_spread_lut) {
-    MEM_freeN(oc->_realsea_spread_lut);
+    MEM_delete(oc->_realsea_spread_lut);
     oc->_realsea_spread_lut = nullptr;
     oc->_realsea_lut_size = 0;
     oc->_realsea_s_max = 0.0f;
