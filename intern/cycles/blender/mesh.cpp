@@ -78,8 +78,8 @@ static void ocean_camera_lod_profile_logf(const char *object_name,
 
 class BlenderOceanSplitSlopeLoader : public ImageLoader {
  public:
-  BlenderOceanSplitSlopeLoader(const ::Ocean *ocean,
-                               const OceanSplitRuntimeLevel &level,
+  BlenderOceanSplitSlopeLoader(const blender::Ocean *ocean,
+                               const blender::OceanSplitRuntimeLevel &level,
                                const int level_index)
       : ocean_(ocean),
         width_(level.size_x),
@@ -89,27 +89,24 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   {
   }
 
-  bool load_metadata(const ImageDeviceFeatures & /*features*/, ImageMetaData &metadata) override
+  bool load_metadata(ImageMetaData &metadata) override
   {
     metadata.type = IMAGE_DATA_TYPE_FLOAT4;
     metadata.channels = 4;
     metadata.width = width_;
     metadata.height = height_;
-    metadata.depth = 1;
     return true;
   }
 
-  bool load_pixels(const ImageMetaData & /*metadata*/,
-                   void *pixels,
-                   const size_t pixels_size,
-                   const bool /*associate_alpha*/) override
+  bool load_pixels(const ImageMetaData &metadata, void *pixels) override
   {
     if (pixels_.empty()) {
       prepare_for_storage();
     }
 
     const size_t expected_elements = size_t(width_) * size_t(height_) * 4;
-    if (pixels_size != expected_elements || pixels_.size() != expected_elements) {
+    if (metadata.width != width_ || metadata.height != height_ || pixels_.size() != expected_elements)
+    {
       return false;
     }
 
@@ -149,7 +146,7 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   }
 
  private:
-  const ::Ocean *ocean_;
+  const blender::Ocean *ocean_;
   int width_;
   int height_;
   int level_index_;
@@ -157,24 +154,29 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   vector<float> pixels_;
 };
 
-static const ::OceanModifierData *blender_object_ocean_split_modifier(const BObjectInfo &b_ob_info)
+static const blender::OceanModifierData *blender_object_ocean_split_modifier(
+    const BObjectInfo &b_ob_info)
 {
   /* The live Ocean runtime is owned by the evaluated depsgraph object, not the persistent
    * original object stored in `real_object`. */
-  const ::Object *object = static_cast<const ::Object *>(b_ob_info.iter_object.ptr.data);
+  const blender::Object *object = b_ob_info.iter_object;
   if (!object) {
     return nullptr;
   }
 
-  for (const ::ModifierData *md = static_cast<const ::ModifierData *>(object->modifiers.last); md;
+  for (const blender::ModifierData *md = static_cast<const blender::ModifierData *>(
+           object->modifiers.last);
+       md;
        md = md->prev)
   {
-    if (md->type != eModifierType_Ocean) {
+    if (md->type != blender::eModifierType_Ocean) {
       continue;
     }
 
-    const ::OceanModifierData *omd = reinterpret_cast<const ::OceanModifierData *>(md);
-    if ((omd->flag & MOD_OCEAN_USE_CAMERA_LOD) == 0 || omd->geometry_mode != MOD_OCEAN_GEOM_GENERATE)
+    const blender::OceanModifierData *omd = reinterpret_cast<const blender::OceanModifierData *>(
+        md);
+    if ((omd->flag & blender::MOD_OCEAN_USE_CAMERA_LOD) == 0 ||
+        omd->geometry_mode != blender::MOD_OCEAN_GEOM_GENERATE)
     {
       continue;
     }
@@ -189,7 +191,7 @@ static const ::OceanModifierData *blender_object_ocean_split_modifier(const BObj
 
 static bool sync_ocean_split_runtime_step_resources(
     Scene *scene,
-    const ::OceanModifierData *omd,
+    const blender::OceanModifierData *omd,
     vector<ImageHandle> *r_slope_images,
     array<float3> *r_cumulative_slope_moments,
     array<int> *r_resolution_x,
@@ -198,7 +200,7 @@ static bool sync_ocean_split_runtime_step_resources(
     array<float> *r_cell_size_x,
     array<float> *r_cell_size_z)
 {
-  if (omd->lod_usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
+  if (omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
     if (r_slope_images != nullptr) {
       r_slope_images->clear();
     }
@@ -220,7 +222,8 @@ static bool sync_ocean_split_runtime_step_resources(
     return false;
   }
 
-  const int level_count = std::min(BKE_ocean_split_level_count_get(omd->ocean), OCEAN_SPLIT_MAX_LEVELS);
+  const int level_count = std::min(BKE_ocean_split_level_count_get(omd->ocean),
+                                   OCEAN_SPLIT_MAX_LEVELS);
   if (level_count <= 0) {
     if (r_slope_images != nullptr) {
       r_slope_images->clear();
@@ -266,7 +269,7 @@ static bool sync_ocean_split_runtime_step_resources(
   }
 
   for (int level_index = 0; level_index < level_count; level_index++) {
-    OceanSplitRuntimeLevel level;
+    blender::OceanSplitRuntimeLevel level;
     if (!BKE_ocean_split_runtime_level_get(omd->ocean, level_index, &level)) {
       if (r_slope_images != nullptr) {
         r_slope_images->resize(level_index);
@@ -323,7 +326,7 @@ static bool sync_ocean_split_runtime_step_resources(
 
 static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_info, Mesh *mesh)
 {
-  const ::OceanModifierData *omd = blender_object_ocean_split_modifier(b_ob_info);
+  const blender::OceanModifierData *omd = blender_object_ocean_split_modifier(b_ob_info);
   mesh->ocean_split_slope_images_pre.clear();
   mesh->ocean_split_slope_images_post.clear();
   mesh->ocean_split_cumulative_slope_moments_pre.clear();
@@ -336,7 +339,7 @@ static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_inf
     return;
   }
 
-  if (omd->lod_usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
+  if (omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
     return;
   }
 
@@ -1230,7 +1233,7 @@ static void create_subd_mesh(Scene *scene,
 
 void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 {
-  const ::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
+  const blender::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
   const bool profile_ocean = ocean_camera_lod_profile_enabled() && ocean_omd != nullptr;
   const string object_name = b_ob_info.real_object.name();
   const double sync_start = profile_ocean ? time_dt() : 0.0;
@@ -1307,7 +1310,7 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
   mesh->clear_non_sockets();
   mesh->ocean_modifier_active = (ocean_omd != nullptr);
   mesh->ocean_camera_lod_active = (ocean_omd != nullptr &&
-                                   (ocean_omd->flag & MOD_OCEAN_USE_CAMERA_LOD) != 0);
+                                   (ocean_omd->flag & blender::MOD_OCEAN_USE_CAMERA_LOD) != 0);
   if (profile_ocean) {
     clear_non_sockets_s = time_dt() - clear_non_sockets_start;
   }
@@ -1372,7 +1375,7 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
     return;
   }
 
-  const ::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
+  const blender::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
   const bool need_ocean_motion_resources = ocean_omd != nullptr;
 
   /* Skip objects without deforming modifiers. this is not totally reliable,
@@ -1551,7 +1554,7 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
   }
 
   if (need_ocean_motion_resources) {
-    const ::OceanModifierData *omd = ocean_omd;
+    const blender::OceanModifierData *omd = ocean_omd;
     if (omd != nullptr) {
       if (motion_step == 0) {
         sync_ocean_split_runtime_step_resources(scene,
