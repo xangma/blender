@@ -19,6 +19,7 @@
 #include "BLI_math_matrix.h"
 #include "BLI_math_vector.h"
 #include "BLI_listbase.h"
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_task.h"
 #include "BLI_time.h"
@@ -1968,7 +1969,7 @@ static OceanModifierData *ocean_modifier_cache_owner(ModifierData *md, const Mod
     return reinterpret_cast<OceanModifierData *>(md);
   }
 
-  LISTBASE_FOREACH (ModifierData *, orig_md, &object_orig->modifiers) {
+  for (ModifierData *orig_md : ListBaseWrapper<ModifierData>(&object_orig->modifiers)) {
     if (orig_md->type == md->type && orig_md->persistent_uid == md->persistent_uid) {
       return reinterpret_cast<OceanModifierData *>(orig_md);
     }

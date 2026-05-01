@@ -48,6 +48,7 @@ static const EnumPropertyItem space_items[] = {
 #ifdef RNA_RUNTIME
 
 #  include "BLI_listbase.h"
+#  include "BLI_listbase_wrapper.hh"
 #  include "BLI_math_matrix.h"
 #  include "BLI_string.h"
 
@@ -372,7 +373,7 @@ static bool rna_Object_multiview_render_view_validate(ReportList *reports,
   }
 
   const SceneRenderView *render_view = nullptr;
-  LISTBASE_FOREACH (const SceneRenderView *, srv, &scene->r.views) {
+  for (const SceneRenderView *srv : ConstListBaseWrapper<SceneRenderView>(&scene->r.views)) {
     if (STREQ(srv->name, view_name)) {
       render_view = srv;
       break;

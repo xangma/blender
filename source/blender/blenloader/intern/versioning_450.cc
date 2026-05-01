@@ -22,6 +22,7 @@
 #include "DNA_sequence_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_math_vector.h"
 #include "BLI_set.hh"
 #include "BLI_string.h"
@@ -5957,8 +5958,8 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 88)) {
-    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
-      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type == eModifierType_Ocean) {
           OceanModifierData *omd = (OceanModifierData *)md;
           omd->flag |= MOD_OCEAN_USE_WAVE_SCALE;
@@ -5968,8 +5969,8 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 89)) {
-    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
-      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type == eModifierType_Ocean) {
           OceanModifierData *omd = (OceanModifierData *)md;
           omd->flag |= MOD_OCEAN_USE_REALSEA_SPREAD;
@@ -5979,8 +5980,8 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 90)) {
-    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
-      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type != eModifierType_Ocean) {
           continue;
         }
@@ -5992,8 +5993,8 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 91)) {
-    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
-      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type != eModifierType_Ocean) {
           continue;
         }
