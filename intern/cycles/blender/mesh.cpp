@@ -1235,7 +1235,7 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 {
   const blender::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
   const bool profile_ocean = ocean_camera_lod_profile_enabled() && ocean_omd != nullptr;
-  const string object_name = b_ob_info.real_object.name();
+  const string object_name = BKE_id_name(b_ob_info.real_object->id);
   const double sync_start = profile_ocean ? time_dt() : 0.0;
   double object_to_mesh_s = 0.0;
   double create_mesh_s = 0.0;
@@ -1475,14 +1475,14 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
           }
         }
         else if (b_verts_num != numverts) {
-          VLOG_WARNING << "Topology differs, disabling motion blur for object " << ob_name;
+          LOG_WARNING << "Topology differs, disabling motion blur for object " << ob_name;
           attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
           if (attr_mN) {
             attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
           }
         }
         else {
-          VLOG_DEBUG << "No actual deformation motion for object " << ob_name;
+          LOG_DEBUG << "No actual deformation motion for object " << ob_name;
           attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
           if (attr_mN) {
             attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
