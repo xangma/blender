@@ -5958,7 +5958,9 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 88)) {
-    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
       for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type == eModifierType_Ocean) {
           OceanModifierData *omd = (OceanModifierData *)md;
@@ -5969,7 +5971,9 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 89)) {
-    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
       for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type == eModifierType_Ocean) {
           OceanModifierData *omd = (OceanModifierData *)md;
@@ -5980,7 +5984,9 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 90)) {
-    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
       for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type != eModifierType_Ocean) {
           continue;
@@ -5993,7 +5999,9 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 91)) {
-    for (Object *ob : ListBaseWrapper<Object>(&bmain->objects)) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
       for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
         if (md->type != eModifierType_Ocean) {
           continue;
