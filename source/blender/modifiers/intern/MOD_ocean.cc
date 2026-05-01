@@ -2071,7 +2071,7 @@ static bool ocean_camera_lod_cache_key_init(const ModifierEvalContext *ctx,
   copy_m4_m4(r_key.camera_matrix, camera->object_to_world().ptr());
 
   if (camera->data != nullptr && camera->type == OB_CAMERA) {
-    const Camera *camera_data = static_cast<const Camera *>(camera->data);
+    const Camera *camera_data = reinterpret_cast<const Camera *>(camera->data);
     r_key.camera_type = camera_data->type;
     r_key.camera_lens = camera_data->lens;
     r_key.camera_sensor_x = camera_data->sensor_x;
@@ -4824,33 +4824,32 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
 
 static void split_panel_draw(const bContext * /*C*/, Panel *panel)
 {
-  uiLayout *col;
-  uiLayout *layout = panel->layout;
+  ui::Layout &layout = *panel->layout;
 
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
   const bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
   const bool stereo_dataset_mode = RNA_enum_get(ptr, "lod_usage_mode") ==
                                    MOD_OCEAN_LOD_USAGE_STEREO_DATASET;
 
-  uiLayoutSetPropSep(layout, true);
+  layout.use_property_split_set(true);
 
-  col = &layout->column(false);
-  uiLayoutSetActive(col, use_camera_lod);
+  ui::Layout &col = layout.column(false);
+  col.active_set(use_camera_lod);
   if (stereo_dataset_mode) {
-    col->label(IFACE_("Stereo Dataset mode uses geometry-only shading for explicit stereo depth"),
-               ICON_NONE);
-    col->label(IFACE_("The ocean_geometry_normal attribute stores the explicit mesh normal"),
-               ICON_NONE);
-    col->label(IFACE_("Cycles skips residual split shading detail in this mode"), ICON_NONE);
+    col.label(IFACE_("Stereo Dataset mode uses geometry-only shading for explicit stereo depth"),
+              ICON_NONE);
+    col.label(IFACE_("The ocean_geometry_normal attribute stores the explicit mesh normal"),
+              ICON_NONE);
+    col.label(IFACE_("Cycles skips residual split shading detail in this mode"), ICON_NONE);
   }
   else {
-    col->label(IFACE_("Cycles reconstructs visible residual detail from the shared ocean hierarchy"),
-               ICON_NONE);
-    col->label(IFACE_("The ocean_geometry_normal attribute stores the explicit geometry-band normal"),
-               ICON_NONE);
-    col->label(IFACE_("Cycles keeps the apparent residual normal internal to shading"),
-               ICON_NONE);
-    col->label(
+    col.label(IFACE_("Cycles reconstructs visible residual detail from the shared ocean hierarchy"),
+              ICON_NONE);
+    col.label(IFACE_("The ocean_geometry_normal attribute stores the explicit geometry-band normal"),
+              ICON_NONE);
+    col.label(IFACE_("Cycles keeps the apparent residual normal internal to shading"),
+              ICON_NONE);
+    col.label(
         IFACE_("Other renderers use geometry-band displacement and geometry custom normals"),
         ICON_NONE);
   }
@@ -4869,8 +4868,8 @@ static void bake_panel_draw(const bContext * /*C*/, Panel *panel)
   bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
 
   if (use_camera_lod) {
-    layout->label(IFACE_("Camera LOD uses live simulation only"), ICON_INFO);
-    layout->label(IFACE_("Bake/cache is unavailable while Camera LOD is enabled"), ICON_NONE);
+    layout.label(IFACE_("Camera LOD uses live simulation only"), ICON_INFO);
+    layout.label(IFACE_("Bake/cache is unavailable while Camera LOD is enabled"), ICON_NONE);
     return;
   }
 
