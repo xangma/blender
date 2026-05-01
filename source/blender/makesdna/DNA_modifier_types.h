@@ -1531,7 +1531,7 @@ struct OceanModifierData {
   char geometry_mode = 0;
 
   /** #OceanModifierFlag. */
-  char flag = 0;
+  char flag = MOD_OCEAN_USE_WAVE_SCALE | MOD_OCEAN_USE_REALSEA_SPREAD;
   char lod_levels = 5;
   char lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
   char lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;

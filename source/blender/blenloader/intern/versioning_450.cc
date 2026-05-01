@@ -10,8 +10,12 @@
 
 #include <fmt/format.h>
 
+/* Define macros in `DNA_genfile.h`. */
+#define DNA_GENFILE_VERSIONING_MACROS
+
 #include "DNA_anim_types.h"
 #include "DNA_brush_types.h"
+#include "DNA_genfile.h"
 #include "DNA_light_types.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
@@ -5009,7 +5013,7 @@ static void version_set_default_bone_drawtype(Main *bmain)
   }
 }
 
-void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_450(FileData *fd, Library * /*lib*/, Main *bmain)
 {
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 2)) {
@@ -5955,6 +5959,43 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!DNA_struct_member_exists(fd->filesdna, "OceanModifierData", "float", "realsea_fmin")) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
+        if (md->type != eModifierType_Ocean) {
+          continue;
+        }
+
+        OceanModifierData *omd = (OceanModifierData *)md;
+        omd->flag |= MOD_OCEAN_USE_WAVE_SCALE | MOD_OCEAN_USE_REALSEA_SPREAD;
+        omd->realsea_fmin = 0.05f;
+        omd->realsea_fmax = 1.0f;
+        omd->realsea_dvar = 1.0f;
+      }
+    }
+  }
+
+  if (!DNA_struct_member_exists(fd->filesdna, "OceanModifierData", "float", "lod_pixel_error")) {
+    for (Object *ob = static_cast<Object *>(bmain->objects.first); ob;
+         ob = static_cast<Object *>(ob->id.next))
+    {
+      for (ModifierData *md : ListBaseWrapper<ModifierData>(&ob->modifiers)) {
+        if (md->type != eModifierType_Ocean) {
+          continue;
+        }
+
+        OceanModifierData *omd = (OceanModifierData *)md;
+        omd->lod_levels = 5;
+        omd->lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+        omd->lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+        omd->lod_pixel_error = 0.5f;
+        omd->lod_camera_full_spectrum_radius = 0.0f;
+      }
+    }
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 88)) {
