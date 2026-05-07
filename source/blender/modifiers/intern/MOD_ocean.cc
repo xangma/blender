@@ -21,6 +21,7 @@
 #include "BLI_listbase.h"
 #include "BLI_path_utils.hh"
 #include "BLI_task.h"
+#include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_array.hh"
@@ -2202,9 +2203,28 @@ struct OceanCameraLODSettings {
   Vector<OceanCameraLODLeaf> leaves;
 };
 
+static bool ocean_camera_lod_leaves_cover_finest_grid(const OceanCameraLODSettings &settings)
+{
+  const int64_t dense_cell_count = int64_t(settings.dense_cells_per_side) *
+                                   int64_t(settings.dense_cells_per_side);
+  if (settings.leaves.size() != dense_cell_count) {
+    return false;
+  }
+
+  for (const OceanCameraLODLeaf &leaf : settings.leaves) {
+    if (leaf.local_level_index != 0 || leaf.stride != 1 || leaf.max_x != leaf.min_x + 1 ||
+        leaf.max_y != leaf.min_y + 1)
+    {
+      return false;
+    }
+  }
+  return true;
+}
+
 static bool ocean_camera_lod_uses_dense_generate_fast_path(const OceanCameraLODSettings &settings)
 {
-  return settings.projection_set.valid && settings.full_domain_dense && !settings.levels.is_empty();
+  return settings.projection_set.valid && !settings.levels.is_empty() &&
+         (settings.full_domain_dense || ocean_camera_lod_leaves_cover_finest_grid(settings));
 }
 
 static void ocean_camera_lod_init_dense_mesh_metadata(const Mesh &mesh,
@@ -2224,10 +2244,13 @@ static void ocean_camera_lod_init_dense_mesh_metadata(const Mesh &mesh,
   r_point_levels.as_mutable_span().fill(split_level_index);
   r_point_morph_factors.as_mutable_span().fill(1.0f);
 
-  for (const int vert : positions.index_range()) {
-    const float2 delta = float2(positions[vert].x, positions[vert].y) - lod_settings.center;
-    r_point_radius[vert] = sqrtf((delta.x * delta.x) + (delta.y * delta.y));
-  }
+  blender::threading::parallel_for(
+      positions.index_range(), 4096, [&](const blender::IndexRange range) {
+        for (const int vert : range) {
+          const float2 delta = float2(positions[vert].x, positions[vert].y) - lod_settings.center;
+          r_point_radius[vert] = sqrtf((delta.x * delta.x) + (delta.y * delta.y));
+        }
+      });
 }
 
 static bool ocean_modifier_runtime_dense_template_matches(
@@ -2905,17 +2928,19 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
     return size_t(dense_y) * size_t(dense_cells_per_side) + size_t(dense_x);
   };
 
-  for (const int leaf_index : io_leaves.index_range()) {
-    const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
-    for (int y = leaf.min_y; y < leaf.max_y; y++) {
-      for (int x = leaf.min_x; x < leaf.max_x; x++) {
-        leaf_owner_cell_map[dense_cell_index(x, y)] = leaf_index;
-      }
-    }
-  }
+  blender::threading::parallel_for(
+      io_leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
+          for (int y = leaf.min_y; y < leaf.max_y; y++) {
+            for (int x = leaf.min_x; x < leaf.max_x; x++) {
+              leaf_owner_cell_map[dense_cell_index(x, y)] = leaf_index;
+            }
+          }
+        }
+      });
 
-  Array<bool> split_leaf(io_leaves.size(), false);
-  bool needs_split = false;
+  Array<int8_t> split_leaf(io_leaves.size(), 0);
 
   auto has_unbalanced_neighbor = [&](const int leaf_index, const OceanCameraLODEdge edge) {
     const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
@@ -2973,27 +2998,37 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
     return false;
   };
 
-  for (const int leaf_index : io_leaves.index_range()) {
-    const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
-    if (!ocean_camera_lod_leaf_can_split(leaf)) {
-      continue;
-    }
+  blender::threading::parallel_for(
+      io_leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
+          if (!ocean_camera_lod_leaf_can_split(leaf)) {
+            continue;
+          }
 
-    if (has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::South) ||
-        has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::East) ||
-        has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::North) ||
-        has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::West)) {
-      split_leaf[leaf_index] = true;
-      needs_split = true;
+          if (has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::South) ||
+              has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::East) ||
+              has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::North) ||
+              has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::West))
+          {
+            split_leaf[leaf_index] = 1;
+          }
+        }
+      });
+
+  int64_t split_count = 0;
+  for (const int leaf_index : split_leaf.index_range()) {
+    if (split_leaf[leaf_index]) {
+      split_count++;
     }
   }
 
-  if (!needs_split) {
+  if (split_count == 0) {
     return false;
   }
 
   Vector<OceanCameraLODLeaf> balanced;
-  balanced.reserve(io_leaves.size());
+  balanced.reserve(io_leaves.size() + split_count * 3);
   for (const int leaf_index : io_leaves.index_range()) {
     const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
     if (split_leaf[leaf_index]) {
@@ -3015,6 +3050,59 @@ static void ocean_camera_lod_balance_leaves(Vector<OceanCameraLODLeaf> &io_leave
       return;
     }
   }
+}
+
+static bool ocean_camera_lod_leaf_needs_split(const OceanModifierData *omd,
+                                              const Span<OceanSplitMomentLevel> moment_levels,
+                                              const OceanCameraLODSettings &settings,
+                                              const OceanSplitRuntimeReadScope *read_scope,
+                                              OceanCameraLODLeaf &leaf)
+{
+  const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(settings, leaf);
+  const float2 leaf_region_max = ocean_camera_lod_leaf_region_max(settings, leaf);
+  const bool can_split = ocean_camera_lod_leaf_can_split(leaf);
+  const bool protected_anchor = ocean_camera_lod_region_intersects_full_spectrum_anchor(
+      settings, leaf_region_min, leaf_region_max);
+
+  if (protected_anchor && can_split) {
+    return true;
+  }
+
+  if (!can_split) {
+    return false;
+  }
+
+  const bool relevant = ocean_camera_lod_region_is_relevant(
+      settings, leaf_region_min, leaf_region_max);
+  if (!relevant) {
+    return false;
+  }
+
+  const bool spectrum_ok = ocean_camera_lod_leaf_spectrum_within_resolvable_bound(
+      moment_levels, settings, leaf, leaf_region_min, leaf_region_max);
+  if (!spectrum_ok) {
+    return true;
+  }
+
+  const bool directly_visible = ocean_camera_lod_region_intersects_projection_set(
+      settings, leaf_region_min, leaf_region_max, 0.0f);
+  if (!directly_visible && !protected_anchor &&
+      settings.validation_mode != MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT)
+  {
+    return false;
+  }
+
+  const OceanLODObservableErrorStats stats = ocean_camera_lod_cell_error_stats(
+      omd, moment_levels, settings, read_scope, leaf, leaf_region_min, leaf_region_max);
+  leaf.error_stats = stats;
+  if (!stats.valid) {
+    return settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT && directly_visible;
+  }
+
+  return !ocean_camera_lod_error_within_tolerance(stats,
+                                                  settings.tolerances,
+                                                  settings.validation_mode,
+                                                  settings.usage_mode);
 }
 
 static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
@@ -3062,7 +3150,7 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
   const int min_y = root_index_min(region_min_y);
   const int max_y = root_index_max(region_max_y, min_y);
 
-  Vector<OceanCameraLODLeaf> pending;
+  Vector<OceanCameraLODLeaf> frontier;
   for (int x = min_x; x < max_x; x += root_stride) {
     for (int y = min_y; y < max_y; y += root_stride) {
       OceanCameraLODLeaf root{};
@@ -3074,75 +3162,43 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       root.max_x = std::min(x + root_stride, settings.dense_cells_per_side);
       root.min_y = y;
       root.max_y = std::min(y + root_stride, settings.dense_cells_per_side);
-      pending.append(root);
+      frontier.append(root);
     }
   }
 
-  while (!pending.is_empty()) {
-    OceanCameraLODLeaf leaf = pending.pop_last();
-    const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(settings, leaf);
-    const float2 leaf_region_max = ocean_camera_lod_leaf_region_max(settings, leaf);
-    const bool can_split = ocean_camera_lod_leaf_can_split(leaf);
-    const bool protected_anchor = ocean_camera_lod_region_intersects_full_spectrum_anchor(
-        settings, leaf_region_min, leaf_region_max);
+  while (!frontier.is_empty()) {
+    Array<int8_t> split_leaf(frontier.size(), 0);
+    blender::threading::parallel_for(
+        frontier.index_range(), 512, [&](const blender::IndexRange range) {
+          for (const int leaf_index : range) {
+            split_leaf[leaf_index] = ocean_camera_lod_leaf_needs_split(
+                omd, moment_levels, settings, read_scope, frontier[leaf_index]);
+          }
+        });
 
-    if (protected_anchor && can_split) {
-      ocean_camera_lod_append_leaf_children(leaf, pending);
-      continue;
-    }
-
-    if (!can_split) {
-      r_leaves.append(leaf);
-      continue;
-    }
-
-    const bool relevant = ocean_camera_lod_region_is_relevant(
-        settings, leaf_region_min, leaf_region_max);
-    if (!relevant) {
-      r_leaves.append(leaf);
-      continue;
-    }
-
-    const bool spectrum_ok = ocean_camera_lod_leaf_spectrum_within_resolvable_bound(
-        moment_levels, settings, leaf, leaf_region_min, leaf_region_max);
-    if (!spectrum_ok) {
-      ocean_camera_lod_append_leaf_children(leaf, pending);
-      continue;
-    }
-
-    const bool directly_visible = ocean_camera_lod_region_intersects_projection_set(
-        settings, leaf_region_min, leaf_region_max, 0.0f);
-    if (!directly_visible && !protected_anchor &&
-        settings.validation_mode != MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT)
-    {
-      r_leaves.append(leaf);
-      continue;
-    }
-
-    const OceanLODObservableErrorStats stats = ocean_camera_lod_cell_error_stats(
-        omd, moment_levels, settings, read_scope, leaf, leaf_region_min, leaf_region_max);
-    if (!stats.valid) {
-      leaf.error_stats = stats;
-      if (settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT && directly_visible) {
-        ocean_camera_lod_append_leaf_children(leaf, pending);
-        continue;
+    int64_t split_count = 0;
+    int64_t keep_count = 0;
+    for (const int leaf_index : frontier.index_range()) {
+      if (split_leaf[leaf_index]) {
+        split_count++;
       }
-      r_leaves.append(leaf);
-      continue;
+      else {
+        keep_count++;
+      }
     }
 
-    const bool accepts = spectrum_ok &&
-                         ocean_camera_lod_error_within_tolerance(stats,
-                                                                 settings.tolerances,
-                                                                 settings.validation_mode,
-                                                                 settings.usage_mode);
-    if (accepts || !can_split) {
-      leaf.error_stats = stats;
-      r_leaves.append(leaf);
+    Vector<OceanCameraLODLeaf> next_frontier;
+    next_frontier.reserve(split_count * 4);
+    r_leaves.reserve(r_leaves.size() + keep_count);
+    for (const int leaf_index : frontier.index_range()) {
+      if (split_leaf[leaf_index]) {
+        ocean_camera_lod_append_leaf_children(frontier[leaf_index], next_frontier);
+      }
+      else {
+        r_leaves.append(frontier[leaf_index]);
+      }
     }
-    else {
-      ocean_camera_lod_append_leaf_children(leaf, pending);
-    }
+    frontier = std::move(next_frontier);
   }
 
   if (r_leaves.is_empty()) {
@@ -3406,6 +3462,14 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   Vector<float> face_leaf_levels;
   Vector<float> face_leaf_split_levels;
   Vector<float> face_cell_sizes;
+  const int64_t expected_leaf_count = lod_settings.leaves.size();
+  const int64_t expected_vert_count = std::min<int64_t>(
+      lod_settings.dense_vert_budget,
+      expected_leaf_count + (int64_t(dense_cells_per_side) * 4) + 4);
+  positions.reserve(expected_vert_count);
+  point_levels.reserve(expected_vert_count);
+  point_morph_factors.reserve(expected_vert_count);
+  point_radius.reserve(expected_vert_count);
   face_offsets.reserve(lod_settings.leaves.size());
   corner_verts.reserve(lod_settings.leaves.size() * 4);
   face_leaf_ids.reserve(lod_settings.leaves.size());
@@ -3510,18 +3574,23 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
     face_cell_sizes.append(cell_size);
   };
 
-  for (const int leaf_index : lod_settings.leaves.index_range()) {
-    const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
-    for (int y = leaf.min_y; y < leaf.max_y; y++) {
-      for (int x = leaf.min_x; x < leaf.max_x; x++) {
-        leaf_owner_cell_map[dense_cell_index(x, y)] = leaf_index;
-      }
-    }
-  }
+  const double owner_map_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+  blender::threading::parallel_for(
+      lod_settings.leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
+          for (int y = leaf.min_y; y < leaf.max_y; y++) {
+            for (int x = leaf.min_x; x < leaf.max_x; x++) {
+              leaf_owner_cell_map[dense_cell_index(x, y)] = leaf_index;
+            }
+          }
+        }
+      });
+  const double owner_map_s = profile_enabled ? (BLI_time_now_seconds() - owner_map_start) : 0.0;
 
   auto edge_split_positions = [&](const int leaf_index, const OceanCameraLODEdge edge) {
     const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
-    Vector<int> positions_along_edge;
+    Vector<int, 8> positions_along_edge;
     const bool horizontal = ELEM(edge, OceanCameraLODEdge::South, OceanCameraLODEdge::North);
     positions_along_edge.append(horizontal ? leaf.min_x : leaf.min_y);
     positions_along_edge.append(horizontal ? leaf.max_x : leaf.max_y);
@@ -3586,7 +3655,7 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
     }
 
     std::sort(positions_along_edge.begin(), positions_along_edge.end());
-    Vector<int> unique_positions;
+    Vector<int, 8> unique_positions;
     int last_position = INT_MIN;
     for (const int position : positions_along_edge) {
       if (unique_positions.is_empty() || position != last_position) {
@@ -3610,16 +3679,16 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
     }
     const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(lod_settings, leaf);
     const float2 leaf_region_max = ocean_camera_lod_leaf_region_max(lod_settings, leaf);
-    const Vector<int> south_x = edge_split_positions(leaf_index, OceanCameraLODEdge::South);
-    const Vector<int> east_y = edge_split_positions(leaf_index, OceanCameraLODEdge::East);
-    const Vector<int> north_x = edge_split_positions(leaf_index, OceanCameraLODEdge::North);
-    const Vector<int> west_y = edge_split_positions(leaf_index, OceanCameraLODEdge::West);
+    const Vector<int, 8> south_x = edge_split_positions(leaf_index, OceanCameraLODEdge::South);
+    const Vector<int, 8> east_y = edge_split_positions(leaf_index, OceanCameraLODEdge::East);
+    const Vector<int, 8> north_x = edge_split_positions(leaf_index, OceanCameraLODEdge::North);
+    const Vector<int, 8> west_y = edge_split_positions(leaf_index, OceanCameraLODEdge::West);
     const bool south_finer = south_x.size() > 2;
     const bool east_finer = east_y.size() > 2;
     const bool north_finer = north_x.size() > 2;
     const bool west_finer = west_y.size() > 2;
 
-    Vector<int> face_verts;
+    Vector<int, 8> face_verts;
     auto append_face_vertex = [&](const int dense_x, const int dense_y, const float morph_factor) {
       face_verts.append(ensure_vertex(dense_x, dense_y, split_level_index, morph_factor));
     };
@@ -3765,11 +3834,12 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
     ocean_camera_lod_profile_logf(
         object_name,
         "geometry_generate",
-        "resolution=%d total_s=%.6f settings_s=%.6f topology_s=%.6f finalize_s=%.6f "
+        "resolution=%d total_s=%.6f settings_s=%.6f owner_map_s=%.6f topology_s=%.6f finalize_s=%.6f "
         "quadtree_levels=%d verts=%d faces=%d dense_budget=%d",
         resolution,
         BLI_time_now_seconds() - profile_start,
         settings_s,
+        owner_map_s,
         topology_s,
         BLI_time_now_seconds() - finalize_start,
         quadtree_levels,
@@ -4118,6 +4188,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   reference_positions.as_mutable_span().copy_from(positions);
   const OffsetIndices faces = result->faces();
   const Span<int> corner_verts = result->corner_verts();
+  const int verts_num = result->verts_num;
   const bool use_camera_lod_mesh = use_camera_lod && camera_lod_levels.size() == result->verts_num &&
                                    camera_lod_morph_factors.size() == result->verts_num;
 
@@ -4269,18 +4340,24 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
   /* displace the geometry */
 
-  /* NOTE: tried to parallelized that one and previous foam loop,
-   * but gives 20% slower results... odd. */
+  /* The dense path uses a scoped ocean read lock before parallelizing, avoiding per-vertex mutex
+   * traffic while keeping the exact same sampling code. Cached ocean reads stay serial. */
   {
     const double displacement_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-    const int verts_num = result->verts_num;
     OceanSplitRuntimeReadScope split_read_scope{};
     const OceanSplitRuntimeReadScope *split_read_scope_ptr = nullptr;
     if (use_camera_lod_mesh && BKE_ocean_split_runtime_read_begin(omd->ocean, &split_read_scope)) {
       split_read_scope_ptr = &split_read_scope;
     }
+    OceanRuntimeReadScope dense_read_scope{};
+    const OceanRuntimeReadScope *dense_read_scope_ptr = nullptr;
+    if (!use_camera_lod && !(omd->oceancache && omd->cached) &&
+        BKE_ocean_runtime_read_begin(omd->ocean, &dense_read_scope))
+    {
+      dense_read_scope_ptr = &dense_read_scope;
+    }
 
-    for (i = 0; i < verts_num; i++) {
+    auto displace_vertex = [&](const int i) {
       float *vco = positions[i];
       const float3 reference_co = reference_positions[i];
       const float2 ref_uv = ocean_reference_uv(reference_co, size_co_inv);
@@ -4300,7 +4377,6 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
         float morph_factor = 1.0f;
 
         if (use_camera_lod_mesh) {
-          runtime_sample_calls++;
           split_level_index = std::clamp(
               camera_lod_levels[i], 0, std::max(BKE_ocean_split_level_count_get(omd->ocean) - 1, 0));
           local_level_index = split_level_index;
@@ -4314,8 +4390,12 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           geometry_support = ocean_support_isotropic(support_wavelength);
 
           if (split_read_scope_ptr != nullptr) {
-            BKE_ocean_split_runtime_sample_level_in_scope(
-                split_read_scope_ptr, split_level_index, ref_uv.x, ref_uv.y, geometry_disp, geometry_normal);
+            BKE_ocean_split_runtime_sample_level_in_scope(split_read_scope_ptr,
+                                                          split_level_index,
+                                                          ref_uv.x,
+                                                          ref_uv.y,
+                                                          geometry_disp,
+                                                          geometry_normal);
           }
           else {
             BKE_ocean_split_runtime_sample_level(
@@ -4324,13 +4404,15 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
           morph_factor = camera_lod_morph_factors[i];
           if (split_level_index > 0 && morph_factor < 1.0f) {
-            runtime_sample_calls++;
-            runtime_morph_blend_calls++;
             float finer_disp[3] = {0.0f, 0.0f, 0.0f};
             float finer_normal[3] = {0.0f, 1.0f, 0.0f};
             if (split_read_scope_ptr != nullptr) {
-              BKE_ocean_split_runtime_sample_level_in_scope(
-                  split_read_scope_ptr, split_level_index - 1, ref_uv.x, ref_uv.y, finer_disp, finer_normal);
+              BKE_ocean_split_runtime_sample_level_in_scope(split_read_scope_ptr,
+                                                            split_level_index - 1,
+                                                            ref_uv.x,
+                                                            ref_uv.y,
+                                                            finer_disp,
+                                                            finer_normal);
             }
             else {
               BKE_ocean_split_runtime_sample_level(
@@ -4342,7 +4424,6 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           }
         }
         else {
-          split_support_eval_calls++;
           OceanSplitResult split_result;
           BKE_ocean_eval_uv_split_support(
               omd->ocean, &split_result, ref_uv.x, ref_uv.y, &geometry_support, &geometry_support);
@@ -4364,8 +4445,9 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
               geometry_normal[0], geometry_normal[1], geometry_normal[2]);
         }
         if (geometry_support_cov_attr) {
-          geometry_support_cov_attr.span[i] = float3(
-              geometry_support.covariance[0], geometry_support.covariance[1], geometry_support.covariance[2]);
+          geometry_support_cov_attr.span[i] = float3(geometry_support.covariance[0],
+                                                     geometry_support.covariance[1],
+                                                     geometry_support.covariance[2]);
         }
         if (camera_lod_level_attr) {
           camera_lod_level_attr.span[i] = float(local_level_index);
@@ -4412,24 +4494,59 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
       else {
         const float u = ref_uv.x;
         const float v = ref_uv.y;
+        OceanResult vertex_ocr;
+        OceanResult &dense_ocr = (dense_read_scope_ptr != nullptr) ? vertex_ocr : ocr;
 
         if (omd->oceancache && omd->cached) {
-          BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
+          BKE_ocean_cache_eval_uv(omd->oceancache, &dense_ocr, cfra_for_cache, u, v);
+        }
+        else if (dense_read_scope_ptr != nullptr) {
+          BKE_ocean_eval_uv_in_scope(dense_read_scope_ptr, &dense_ocr, u, v);
         }
         else {
-          BKE_ocean_eval_uv(omd->ocean, &ocr, u, v);
+          BKE_ocean_eval_uv(omd->ocean, &dense_ocr, u, v);
         }
 
-        vco[2] += ocr.disp[1];
+        vco[2] += dense_ocr.disp[1];
 
         if (omd->chop_amount > 0.0f) {
-          vco[0] += ocr.disp[0];
-          vco[1] += ocr.disp[2];
+          vco[0] += dense_ocr.disp[0];
+          vco[1] += dense_ocr.disp[2];
+        }
+      }
+    };
+
+    if ((use_camera_lod && !split_debug_enabled) || dense_read_scope_ptr != nullptr) {
+      blender::threading::parallel_for(
+          blender::IndexRange(verts_num), 1024, [&](const blender::IndexRange range) {
+            for (const int i : range) {
+              displace_vertex(i);
+            }
+          });
+    }
+    else {
+      for (i = 0; i < verts_num; i++) {
+        displace_vertex(i);
+      }
+    }
+
+    if (use_camera_lod_mesh) {
+      runtime_sample_calls = verts_num;
+      for (const int vert : camera_lod_levels.index_range()) {
+        if (camera_lod_levels[vert] > 0 && camera_lod_morph_factors[vert] < 1.0f) {
+          runtime_sample_calls++;
+          runtime_morph_blend_calls++;
         }
       }
     }
+    else if (use_camera_lod) {
+      split_support_eval_calls = verts_num;
+    }
     if (split_read_scope_ptr != nullptr) {
       BKE_ocean_split_runtime_read_end(&split_read_scope);
+    }
+    if (dense_read_scope_ptr != nullptr) {
+      BKE_ocean_runtime_read_end(&dense_read_scope);
     }
     if (profile_enabled) {
       displacement_s = BLI_time_now_seconds() - displacement_start;
@@ -4494,13 +4611,14 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     if (use_camera_lod_mesh && !custom_normals.is_empty()) {
       const double normal_override_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
       const blender::Span<float3> mesh_normals = result->vert_normals();
-      for (const int vert : custom_normals.index_range()) {
-        if (vert < camera_lod_levels.size() &&
-            camera_lod_levels[vert] == 0)
-        {
-          custom_normals[vert] = mesh_normals[vert];
-        }
-      }
+      blender::threading::parallel_for(
+          custom_normals.index_range(), 4096, [&](const blender::IndexRange range) {
+            for (const int vert : range) {
+              if (vert < camera_lod_levels.size() && camera_lod_levels[vert] == 0) {
+                custom_normals[vert] = mesh_normals[vert];
+              }
+            }
+          });
       if (profile_enabled) {
         finish_normal_override_s = BLI_time_now_seconds() - normal_override_start;
       }
@@ -4511,7 +4629,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
        * normals. Cycles uses the exported ocean normal attributes directly and avoids building a
        * large custom-normal layer. */
       const double custom_normal_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-      blender::bke::mesh_set_custom_normals_from_verts(*result, custom_normals);
+      blender::bke::mesh_set_custom_normals_from_verts_normalized(*result, custom_normals);
       if (profile_enabled) {
         finish_custom_normal_s = BLI_time_now_seconds() - custom_normal_start;
       }

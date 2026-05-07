@@ -907,7 +907,7 @@ float BKE_ocean_jminus_to_foam(float jminus, float coverage)
   return foam;
 }
 
-void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
+static void ocean_eval_uv_locked(const Ocean *oc, OceanResult *ocr, float u, float v)
 {
   int i0, i1, j0, j1;
   float frac_x, frac_z;
@@ -923,8 +923,6 @@ void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
   if (v < 0) {
     v += 1.0f;
   }
-
-  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
 
   uu = u * oc->_M;
   vv = v * oc->_N;
@@ -975,7 +973,47 @@ void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
   }
 #  undef BILERP
 
+}
+
+void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
+{
+  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
+  ocean_eval_uv_locked(oc, ocr, u, v);
   BLI_rw_mutex_unlock(&oc->oceanmutex);
+}
+
+bool BKE_ocean_runtime_read_begin(const Ocean *oc, OceanRuntimeReadScope *r_scope)
+{
+  if (!oc || !r_scope) {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+  r_scope->ocean = oc;
+  return true;
+}
+
+void BKE_ocean_runtime_read_end(OceanRuntimeReadScope *scope)
+{
+  if (!scope || !scope->ocean) {
+    return;
+  }
+
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&scope->ocean->oceanmutex));
+  scope->ocean = nullptr;
+}
+
+bool BKE_ocean_eval_uv_in_scope(const OceanRuntimeReadScope *scope,
+                                OceanResult *ocr,
+                                const float u,
+                                const float v)
+{
+  if (!scope || !scope->ocean || !ocr) {
+    return false;
+  }
+
+  ocean_eval_uv_locked(scope->ocean, ocr, u, v);
+  return true;
 }
 
 void BKE_ocean_eval_uv_catrom(Ocean *oc, OceanResult *ocr, float u, float v)
@@ -2619,6 +2657,21 @@ float BKE_ocean_jminus_to_foam(float /*jminus*/, float /*coverage*/)
 }
 
 void BKE_ocean_eval_uv(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*u*/, float /*v*/) {}
+
+bool BKE_ocean_runtime_read_begin(const Ocean * /*oc*/, OceanRuntimeReadScope * /*r_scope*/)
+{
+  return false;
+}
+
+void BKE_ocean_runtime_read_end(OceanRuntimeReadScope * /*scope*/) {}
+
+bool BKE_ocean_eval_uv_in_scope(const OceanRuntimeReadScope * /*scope*/,
+                                OceanResult * /*ocr*/,
+                                const float /*u*/,
+                                const float /*v*/)
+{
+  return false;
+}
 
 /* use catmullrom interpolation rather than linear */
 void BKE_ocean_eval_uv_catrom(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*u*/, float /*v*/) {}
