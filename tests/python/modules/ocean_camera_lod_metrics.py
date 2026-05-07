@@ -35,6 +35,8 @@ NORMAL_MAX_TOL_DEG = 12.0
 POSITION_MEAN_TOL = 0.35
 POSITION_MAX_TOL = 1.50
 
+OCEAN_RESOLUTION_OVERRIDE = None
+
 
 @dataclass(frozen=True)
 class DistributionStats:
@@ -141,6 +143,7 @@ class BenchmarkRunSummary:
     mode: str
     samples: int
     resolution: int
+    ocean_resolution: int | None
     repeat_eval: int
     repeat_render: int
     overall_status: str
@@ -251,6 +254,9 @@ def make_ocean_object(name="OceanObj",
                       wave_direction=None,
                       wave_alignment=None,
                       seed=None):
+    if OCEAN_RESOLUTION_OVERRIDE is not None:
+        resolution = OCEAN_RESOLUTION_OVERRIDE
+
     mesh = bpy.data.meshes.new(f"{name}Mesh")
     obj = bpy.data.objects.new(name, mesh)
     bpy.context.scene.collection.objects.link(obj)
@@ -262,8 +268,10 @@ def make_ocean_object(name="OceanObj",
     mod.spatial_size = spatial_size
     mod.size = size
     mod.use_normals = True
-    mod.use_camera_lod = camera_lod
-    mod.lod_levels = lod_levels
+    if hasattr(mod, "use_camera_lod"):
+        mod.use_camera_lod = camera_lod
+    if hasattr(mod, "lod_levels"):
+        mod.lod_levels = lod_levels
     if hasattr(mod, "lod_pixel_error"):
         mod.lod_pixel_error = lod_pixel_error
     if hasattr(mod, "lod_camera_full_spectrum_radius"):
@@ -788,6 +796,10 @@ def dense_mesh_stats(obj):
 
 
 def assert_camera_lod_attributes(obj):
+    mod = obj.modifiers.get("Ocean")
+    if mod is None or not getattr(mod, "use_camera_lod", False):
+        return
+
     bpy.context.view_layer.update()
     depsgraph = bpy.context.evaluated_depsgraph_get()
     obj_eval = obj.evaluated_get(depsgraph)
@@ -1810,26 +1822,34 @@ def run_benchmark_suite(*,
                         mode,
                         samples,
                         resolution,
+                        ocean_resolution,
                         repeat_eval,
                         repeat_render,
                         keep_intermediates):
+    global OCEAN_RESOLUTION_OVERRIDE
+
     outdir = Path(outdir).resolve()
     outdir.mkdir(parents=True, exist_ok=True)
 
     cases = []
-    for scenario_name in scenario_names:
-        for device_name in device_names:
-            cases.append(benchmark_case_with_error_capture(
-                scenario_name=scenario_name,
-                device_name=device_name,
-                mode=mode,
-                outdir=outdir,
-                samples=samples,
-                resolution=resolution,
-                repeat_eval=repeat_eval,
-                repeat_render=repeat_render,
-                keep_intermediates=keep_intermediates,
-            ))
+    previous_ocean_resolution_override = OCEAN_RESOLUTION_OVERRIDE
+    OCEAN_RESOLUTION_OVERRIDE = ocean_resolution
+    try:
+        for scenario_name in scenario_names:
+            for device_name in device_names:
+                cases.append(benchmark_case_with_error_capture(
+                    scenario_name=scenario_name,
+                    device_name=device_name,
+                    mode=mode,
+                    outdir=outdir,
+                    samples=samples,
+                    resolution=resolution,
+                    repeat_eval=repeat_eval,
+                    repeat_render=repeat_render,
+                    keep_intermediates=keep_intermediates,
+                ))
+    finally:
+        OCEAN_RESOLUTION_OVERRIDE = previous_ocean_resolution_override
 
     runtime_error_count = sum(1 for case in cases if case.status == "error")
     threshold_failure_count = sum(1 for case in cases if case.threshold_failures)
@@ -1854,6 +1874,7 @@ def run_benchmark_suite(*,
         mode=mode,
         samples=samples,
         resolution=resolution,
+        ocean_resolution=ocean_resolution,
         repeat_eval=repeat_eval,
         repeat_render=repeat_render,
         overall_status=overall_status,
