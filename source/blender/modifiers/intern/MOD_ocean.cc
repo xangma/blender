@@ -278,6 +278,7 @@ struct OceanCameraLODRegionProfile {
   int call_count = 0;
   int sample_count = 0;
   int sample_eval_count = 0;
+  int hard_cap_exit_count = 0;
   double total_s = 0.0;
   double sample_eval_s = 0.0;
 };
@@ -755,6 +756,36 @@ static bool ocean_camera_lod_error_within_tolerance(const OceanLODObservableErro
 
   const float soft_position_tol = tolerances.position_m * tolerances.position_soft_scale;
   return within_metric(stats.rms.position_m, stats.max.position_m, soft_position_tol);
+}
+
+static bool ocean_camera_lod_error_exceeds_hard_cap(const OceanLODObservableError &max_error,
+                                                    const OceanLODObservableTolerances &tolerances,
+                                                    const int validation_mode,
+                                                    const int usage_mode)
+{
+  const auto exceeds_metric = [&](const float max_value, const float tolerance) {
+    return max_value > tolerance * tolerances.hard_cap_scale;
+  };
+
+  if (exceeds_metric(max_error.reprojection_px, tolerances.reprojection_px) ||
+      exceeds_metric(max_error.depth_m, tolerances.depth_m) ||
+      exceeds_metric(max_error.normal_radians, tolerances.normal_radians))
+  {
+    return true;
+  }
+
+  if (usage_mode != MOD_OCEAN_LOD_USAGE_STEREO_DATASET &&
+      (exceeds_metric(max_error.temporal_px, tolerances.temporal_px) ||
+       exceeds_metric(max_error.grazing_px, tolerances.grazing_px)))
+  {
+    return true;
+  }
+
+  const float position_tolerance =
+      (validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT) ?
+          tolerances.position_m :
+          tolerances.position_m * tolerances.position_soft_scale;
+  return exceeds_metric(max_error.position_m, position_tolerance);
 }
 
 static void ocean_lod_relevant_footprint_expand(OceanLODRelevantFootprint &io_union,
@@ -2626,6 +2657,7 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
   OceanLODObservableError margin_max{};
   OceanLODObservableError combined_max{};
   int sample_count = 0;
+  bool hard_cap_exceeded = false;
   const float sample_extent = std::max(region_max.x - region_min.x, region_max.y - region_min.y);
   const float blind_spot_radius = 0.25f * std::max(sample_extent, 1.0e-6f);
 
@@ -2736,6 +2768,8 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
     combined_max.grazing_px = std::max(
         combined_max.grazing_px, sample.sampled.grazing_px + sample.margin.grazing_px);
     sample_count++;
+    hard_cap_exceeded |= ocean_camera_lod_error_exceeds_hard_cap(
+        combined_max, settings.tolerances, settings.validation_mode, settings.usage_mode);
   };
 
   const bool require_visible_sample = !(settings.validation_mode ==
@@ -2750,12 +2784,12 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
     if (!ocean_split_sample_geometry_level_object(
             omd, read_scope, 0, coord, reference_position_object, reference_normal_object))
     {
-      return;
+      return false;
     }
     if (require_visible_sample &&
         !ocean_camera_lod_point_visible(settings.projection_set, reference_position_object))
     {
-      return;
+      return false;
     }
 
     float3 position_object;
@@ -2779,6 +2813,7 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
       g_ocean_camera_lod_region_profile.sample_eval_count++;
       g_ocean_camera_lod_region_profile.sample_eval_s += BLI_time_now_seconds() - sample_profile_start;
     }
+    return hard_cap_exceeded;
   };
 
   static const float sample_coords[] = {0.0f, 0.5f, 1.0f};
@@ -2787,11 +2822,16 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
       const float2 coord = float2(
           region_min.x + (u * (region_max.x - region_min.x)),
           region_min.y + (v * (region_max.y - region_min.y)));
-      accumulate_coord(coord);
+      if (accumulate_coord(coord)) {
+        break;
+      }
+    }
+    if (hard_cap_exceeded) {
+      break;
     }
   }
 
-  if (sample_count == 0) {
+  if (!hard_cap_exceeded && sample_count == 0) {
     for (const OceanCameraProjection &projection : settings.projection_set.projections) {
       Vector<float2> polygon;
       if (!ocean_camera_projection_region_clip_polygon(projection, region_min, region_max, polygon)) {
@@ -2803,10 +2843,14 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
         centroid += coord;
       }
       centroid /= float(polygon.size());
-      accumulate_coord(centroid);
+      if (accumulate_coord(centroid)) {
+        break;
+      }
 
       for (const float2 &coord : polygon) {
-        accumulate_coord(coord);
+        if (accumulate_coord(coord)) {
+          break;
+        }
       }
 
       if (sample_count > 0) {
@@ -2848,6 +2892,9 @@ static OceanLODObservableErrorStats ocean_camera_lod_cell_error_stats(
   if (profile_enabled) {
     g_ocean_camera_lod_region_profile.call_count++;
     g_ocean_camera_lod_region_profile.sample_count += sample_count;
+    if (hard_cap_exceeded) {
+      g_ocean_camera_lod_region_profile.hard_cap_exit_count++;
+    }
     g_ocean_camera_lod_region_profile.total_s += BLI_time_now_seconds() - profile_start;
   }
   return stats;
@@ -3385,7 +3432,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
         profile_stage ? profile_stage : "settings",
         "mode=%s selection=%s resolution=%d total_s=%.6f projection_s=%.6f leaf_build_s=%.6f "
         "region_stats_s=%.6f region_calls=%d region_samples=%d sample_eval_s=%.6f sample_evals=%d "
-        "quadtree_levels=%d dense_budget=%d",
+        "hard_cap_exits=%d quadtree_levels=%d dense_budget=%d",
         settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT ? "GEOMETRY_STRICT" :
                                                                               "CAMERA_OBSERVABLE",
         build_leaves ? "sampled" : "cached_topology",
@@ -3398,6 +3445,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
         region_profile.sample_count,
         region_profile.sample_eval_s,
         region_profile.sample_eval_count,
+        region_profile.hard_cap_exit_count,
         settings.quadtree_levels,
         settings.dense_vert_budget);
   }
