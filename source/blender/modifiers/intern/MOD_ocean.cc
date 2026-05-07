@@ -4717,9 +4717,19 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     if (!custom_normals.is_empty()) {
       /* Non-Cycles renderers fall back to explicit geometry-band displacement plus geometry-band
        * normals. Cycles uses the exported ocean normal attributes directly and avoids building a
-       * large custom-normal layer. */
+       * large custom-normal layer. Store the LOD normals as a point-domain float vector rather
+       * than encoding them through the generic corner custom-normal path, because the modifier
+       * produces one normalized normal per vertex. */
       const double custom_normal_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-      blender::bke::mesh_set_custom_normals_from_verts_normalized(*result, custom_normals);
+      blender::bke::MutableAttributeAccessor attributes = result->attributes_for_write();
+      attributes.remove("custom_normal");
+      blender::bke::SpanAttributeWriter<float3> custom_normal_attr =
+          attributes.lookup_or_add_for_write_only_span<float3>("custom_normal",
+                                                               blender::bke::AttrDomain::Point);
+      if (custom_normal_attr) {
+        custom_normal_attr.span.copy_from(custom_normals.as_span());
+        custom_normal_attr.finish();
+      }
       if (profile_enabled) {
         finish_custom_normal_s = BLI_time_now_seconds() - custom_normal_start;
       }
