@@ -24,6 +24,12 @@ def create_argparser():
     parser.add_argument("--mode", default="report", choices={"report", "strict"})
     parser.add_argument("--samples", default=4, type=int)
     parser.add_argument("--resolution", default=64, type=int)
+    parser.add_argument(
+        "--ocean-resolution",
+        default=None,
+        type=int,
+        help="Override the ocean modifier resolution used by curated scenarios.",
+    )
     parser.add_argument("--repeat-eval", default=3, type=int)
     parser.add_argument("--repeat-render", default=3, type=int)
     parser.add_argument("--keep-intermediates", action="store_true")
@@ -45,6 +51,7 @@ def main():
         mode=args.mode,
         samples=args.samples,
         resolution=args.resolution,
+        ocean_resolution=args.ocean_resolution,
         repeat_eval=args.repeat_eval,
         repeat_render=args.repeat_render,
         keep_intermediates=args.keep_intermediates,
