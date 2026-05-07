@@ -207,6 +207,7 @@ class Camera : public Node {
   void compute_auto_viewplane();
 
   void update(Scene *scene);
+  void update_for_dicing();
 
   void device_update(Device *device, DeviceScene *dscene, Scene *scene);
   void device_update_volume(Device *device, DeviceScene *dscene, Scene *scene);
@@ -235,6 +236,8 @@ class Camera : public Node {
   void clear_osl_camera(Scene *scene);
 
  private:
+  void update_impl(const int need_motion, Scene *scene);
+
   /* Private utility functions. */
   float3 transform_full_raster_to_world(const float raster_x, const float raster_y);
 };

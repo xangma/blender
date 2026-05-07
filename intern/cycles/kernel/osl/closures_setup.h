@@ -9,6 +9,7 @@
 
 #include "kernel/closure/alloc.h"
 #include "kernel/closure/bsdf.h"
+#include "kernel/closure/bsdf_ocean.h"
 #include "kernel/closure/bssrdf.h"
 #include "kernel/closure/emissive.h"
 #include "kernel/closure/volume.h"
@@ -72,6 +73,73 @@ ccl_device_forceinline bool osl_closure_skip(KernelGlobals kg,
   }
 
   return false;
+}
+
+ccl_device_forceinline float3 osl_ocean_default_normal(KernelGlobals kg,
+                                                       ccl_private ShaderData *sd,
+                                                       const float3 closure_normal)
+{
+  const float3 fallback = safe_normalize_fallback(closure_normal, sd->N);
+
+  float3 ocean_visible_normal;
+  if (ocean_split_visible_normal(kg, sd, &ocean_visible_normal)) {
+    if (dot(fallback, sd->N) < 0.9999f) {
+      return ocean_split_retarget_material_normal(kg, sd, sd->N, fallback, ocean_visible_normal);
+    }
+    return ocean_visible_normal;
+  }
+  return fallback;
+}
+
+ccl_device_forceinline void osl_ocean_microfacet_apply_unresolved_anisotropic(
+    KernelGlobals kg, ccl_private ShaderData *sd, ccl_private MicrofacetBsdf *bsdf)
+{
+  float3 ocean_covariance;
+  if (!ocean_split_unresolved_covariance(kg, sd, &ocean_covariance)) {
+    return;
+  }
+
+  float3 ocean_T, ocean_B;
+  ocean_split_tangent_basis(kg, sd, bsdf->N, &ocean_T, &ocean_B);
+
+  const float material_alpha_x2 = sqr(bsdf->alpha_x);
+  const float material_alpha_y2 = sqr(bsdf->alpha_y);
+  float material_xx = material_alpha_x2;
+  float material_xz = 0.0f;
+  float material_zz = material_alpha_y2;
+
+  float3 material_T = bsdf->T - dot(bsdf->T, bsdf->N) * bsdf->N;
+  if (!is_zero(material_T)) {
+    material_T = normalize(material_T);
+    float tx = dot(material_T, ocean_T);
+    float tz = dot(material_T, ocean_B);
+    const float tangent_len = sqrtf(fmaxf(tx * tx + tz * tz, 1.0e-20f));
+    tx /= tangent_len;
+    tz /= tangent_len;
+
+    material_xx = tx * tx * material_alpha_x2 + tz * tz * material_alpha_y2;
+    material_xz = tx * tz * (material_alpha_x2 - material_alpha_y2);
+    material_zz = tz * tz * material_alpha_x2 + tx * tx * material_alpha_y2;
+  }
+  else if (fabsf(bsdf->alpha_x - bsdf->alpha_y) <= 1.0e-8f) {
+    material_xx = material_alpha_x2;
+    material_xz = 0.0f;
+    material_zz = material_alpha_x2;
+  }
+
+  const float total_xx = material_xx + ocean_covariance.x;
+  const float total_xz = material_xz + ocean_covariance.y;
+  const float total_zz = material_zz + ocean_covariance.z;
+  const float trace = total_xx + total_zz;
+  const float diff = total_xx - total_zz;
+  const float discriminant = sqrtf(fmaxf(diff * diff + 4.0f * total_xz * total_xz, 0.0f));
+  const float variance_x = fmaxf(0.0f, 0.5f * (trace + discriminant));
+  const float variance_y = fmaxf(0.0f, 0.5f * (trace - discriminant));
+  const float angle = 0.5f * atan2f(2.0f * total_xz, diff);
+
+  bsdf->T = safe_normalize_fallback(cosf(angle) * ocean_T + sinf(angle) * ocean_B, ocean_T);
+  bsdf->alpha_x = sqrtf(variance_x);
+  bsdf->alpha_y = sqrtf(variance_y);
 }
 
 /* Diffuse */
@@ -197,7 +265,8 @@ ccl_device void osl_closure_reflection_setup(KernelGlobals kg,
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = bsdf->alpha_y = 0.0f;
 
   sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
@@ -220,7 +289,8 @@ ccl_device void osl_closure_refraction_setup(KernelGlobals kg,
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->ior = closure->ior;
   bsdf->alpha_x = bsdf->alpha_y = 0.0f;
 
@@ -287,11 +357,15 @@ ccl_device void osl_closure_dielectric_bsdf_setup(KernelGlobals kg,
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->ior = closure->ior;
   bsdf->T = closure->T;
+  if (has_reflection && !has_transmission) {
+    osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
+  }
 
   bool preserve_energy = false;
 
@@ -361,11 +435,13 @@ ccl_device void osl_closure_conductor_bsdf_setup(KernelGlobals kg,
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->ior = 0.0f;
   bsdf->T = closure->T;
+  osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
   bool preserve_energy = false;
 
@@ -420,7 +496,8 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->T = closure->T;
@@ -434,6 +511,9 @@ ccl_device void osl_closure_generalized_schlick_bsdf_setup(
   }
   else {
     bsdf->ior = ior_from_F0(average(closure->f0));
+  }
+  if (has_reflection && !has_transmission) {
+    osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
   }
 
   bool preserve_energy = false;
@@ -513,11 +593,15 @@ ccl_device void osl_closure_microfacet_setup(KernelGlobals kg,
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->ior = closure->ior;
   bsdf->T = closure->T;
+  if (closure->refract == 0) {
+    osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
+  }
 
   /* Beckmann */
   if (closure->distribution == make_string("beckmann", 14712237670914973463ull)) {
@@ -589,11 +673,13 @@ ccl_device void osl_closure_microfacet_f82_tint_setup(
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->ior = 0.0f;
   bsdf->T = closure->T;
+  osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
   bool preserve_energy = false;
 
@@ -636,7 +722,8 @@ ccl_device void osl_closure_microfacet_multi_ggx_glass_setup(
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = bsdf->alpha_x;
   bsdf->ior = closure->ior;
@@ -667,12 +754,14 @@ ccl_device void osl_closure_microfacet_multi_ggx_aniso_setup(
     return;
   }
 
-  bsdf->N = maybe_ensure_valid_specular_reflection(sd, safe_normalize_fallback(closure->N, sd->N));
+  bsdf->N = maybe_ensure_valid_specular_reflection(
+      sd, osl_ocean_default_normal(kg, sd, closure->N));
   bsdf->alpha_x = closure->alpha_x;
   bsdf->alpha_y = closure->alpha_y;
   bsdf->ior = 1.0f;
 
   bsdf->T = closure->T;
+  osl_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
   sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
   bsdf_microfacet_setup_fresnel_constant(kg, bsdf, sd, rgb_to_spectrum(closure->color));

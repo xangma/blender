@@ -1082,6 +1082,20 @@ ccl_device int bsdf_microfacet_beckmann_setup(ccl_private MicrofacetBsdf *bsdf)
   return SD_BSDF | bsdf_microfacet_eval_flag(bsdf);
 }
 
+ccl_device int bsdf_ocean_unresolved_reflection_setup(ccl_private MicrofacetBsdf *bsdf)
+{
+  bsdf->alpha_x = saturatef(bsdf->alpha_x);
+  bsdf->alpha_y = saturatef(bsdf->alpha_y);
+
+  /* Ocean unresolved reflection is modeled as a dedicated Gaussian slope distribution around the
+   * visible split-spectrum mean direction. Keep it reflective-only and parameterized directly by
+   * ocean slope covariance, rather than treating it as a stock glossy closure. */
+  bsdf->fresnel_type = MicrofacetFresnel::NONE;
+  bsdf->type = CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID;
+
+  return SD_BSDF | bsdf_microfacet_eval_flag(bsdf);
+}
+
 ccl_device int bsdf_microfacet_beckmann_refraction_setup(ccl_private MicrofacetBsdf *bsdf)
 {
   bsdf->alpha_x = saturatef(bsdf->alpha_x);
@@ -1113,6 +1127,16 @@ ccl_device Spectrum bsdf_microfacet_beckmann_eval(KernelGlobals kg,
   return bsdf_microfacet_eval<MicrofacetType::BECKMANN>(kg, sc, wi, wo, pdf);
 }
 
+ccl_device Spectrum bsdf_ocean_unresolved_reflection_eval(KernelGlobals kg,
+                                                          const ccl_private ShaderClosure *sc,
+                                                          const float3 Ng,
+                                                          const float3 wi,
+                                                          const float3 wo,
+                                                          ccl_private float *pdf)
+{
+  return bsdf_microfacet_eval<MicrofacetType::BECKMANN>(kg, sc, Ng, wi, wo, pdf);
+}
+
 ccl_device int bsdf_microfacet_beckmann_sample(KernelGlobals kg,
                                                const ccl_private ShaderClosure *sc,
                                                const float3 Ng,
@@ -1123,6 +1147,21 @@ ccl_device int bsdf_microfacet_beckmann_sample(KernelGlobals kg,
                                                ccl_private float *pdf,
                                                ccl_private float2 *sampled_roughness,
                                                ccl_private float *eta)
+{
+  return bsdf_microfacet_sample<MicrofacetType::BECKMANN>(
+      kg, sc, Ng, wi, rand, eval, wo, pdf, sampled_roughness, eta);
+}
+
+ccl_device int bsdf_ocean_unresolved_reflection_sample(KernelGlobals kg,
+                                                       const ccl_private ShaderClosure *sc,
+                                                       const float3 Ng,
+                                                       const float3 wi,
+                                                       const float3 rand,
+                                                       ccl_private Spectrum *eval,
+                                                       ccl_private float3 *wo,
+                                                       ccl_private float *pdf,
+                                                       ccl_private float2 *sampled_roughness,
+                                                       ccl_private float *eta)
 {
   return bsdf_microfacet_sample<MicrofacetType::BECKMANN>(
       kg, sc, Ng, wi, rand, eval, wo, pdf, sampled_roughness, eta);

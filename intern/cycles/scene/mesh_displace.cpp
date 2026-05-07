@@ -12,6 +12,7 @@
 #include "scene/shader.h"
 
 #include "util/progress.h"
+#include "util/string.h"
 
 CCL_NAMESPACE_BEGIN
 

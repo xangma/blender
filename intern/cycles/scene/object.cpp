@@ -560,6 +560,66 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
                                    0 :
                                    ob->blocker_shadow_set;
   kobject.shadow_set_membership = ob->shadow_set_membership;
+  kobject.ocean_split_level_count = 0;
+  kobject.ocean_split_min_wavelength = 0.0f;
+  for (int level = 0; level < OCEAN_SPLIT_MAX_LEVELS; level++) {
+    kobject.ocean_split_resolution_x[level] = 0;
+    kobject.ocean_split_resolution_y[level] = 0;
+    kobject.ocean_split_cell_size_x[level] = 0.0f;
+    kobject.ocean_split_cell_size_z[level] = 0.0f;
+    kobject.ocean_split_slope_texture_slots[level] = -1;
+    kobject.ocean_split_slope_texture_slots_pre[level] = -1;
+    kobject.ocean_split_slope_texture_slots_post[level] = -1;
+    kobject.ocean_split_cumulative_slope_moments[level] = zero_float3();
+    kobject.ocean_split_cumulative_slope_moments_pre[level] = zero_float3();
+    kobject.ocean_split_cumulative_slope_moments_post[level] = zero_float3();
+  }
+
+  if (geom->is_mesh()) {
+    const Mesh *mesh = static_cast<const Mesh *>(geom);
+    const int ocean_level_count = std::min(
+        int(mesh->ocean_split_slope_images.size()), OCEAN_SPLIT_MAX_LEVELS);
+    if (ocean_level_count > 0) {
+      kobject.ocean_split_level_count = ocean_level_count;
+      kobject.ocean_split_min_wavelength = mesh->ocean_split_min_wavelength;
+
+      for (int level = 0; level < ocean_level_count; level++) {
+        kobject.ocean_split_resolution_x[level] =
+            (level < mesh->ocean_split_resolution_x.size()) ? mesh->ocean_split_resolution_x[level] : 0;
+        kobject.ocean_split_resolution_y[level] =
+            (level < mesh->ocean_split_resolution_y.size()) ? mesh->ocean_split_resolution_y[level] : 0;
+        kobject.ocean_split_cell_size_x[level] =
+            (level < mesh->ocean_split_cell_size_x.size()) ? mesh->ocean_split_cell_size_x[level] : 0.0f;
+        kobject.ocean_split_cell_size_z[level] =
+            (level < mesh->ocean_split_cell_size_z.size()) ? mesh->ocean_split_cell_size_z[level] : 0.0f;
+        const ImageHandle &handle = mesh->ocean_split_slope_images[level];
+        kobject.ocean_split_slope_texture_slots[level] = handle.empty() ? -1 : handle.svm_slot();
+        kobject.ocean_split_cumulative_slope_moments[level] =
+            (level < mesh->ocean_split_cumulative_slope_moments.size()) ?
+                mesh->ocean_split_cumulative_slope_moments[level] :
+                zero_float3();
+
+        const ImageHandle &pre_handle = (level < mesh->ocean_split_slope_images_pre.size()) ?
+                                            mesh->ocean_split_slope_images_pre[level] :
+                                            ImageHandle();
+        const ImageHandle &post_handle = (level < mesh->ocean_split_slope_images_post.size()) ?
+                                             mesh->ocean_split_slope_images_post[level] :
+                                             ImageHandle();
+        kobject.ocean_split_slope_texture_slots_pre[level] = pre_handle.empty() ? -1 :
+                                                                 pre_handle.svm_slot();
+        kobject.ocean_split_slope_texture_slots_post[level] = post_handle.empty() ? -1 :
+                                                                  post_handle.svm_slot();
+        kobject.ocean_split_cumulative_slope_moments_pre[level] =
+            (level < mesh->ocean_split_cumulative_slope_moments_pre.size()) ?
+                mesh->ocean_split_cumulative_slope_moments_pre[level] :
+                zero_float3();
+        kobject.ocean_split_cumulative_slope_moments_post[level] =
+            (level < mesh->ocean_split_cumulative_slope_moments_post.size()) ?
+                mesh->ocean_split_cumulative_slope_moments_post[level] :
+                zero_float3();
+      }
+    }
+  }
 
   if (geom->get_use_motion_blur()) {
     state->have_motion = true;
@@ -868,7 +928,7 @@ void ObjectManager::device_update(Device *device,
       object->index = index++;
 
       /* this is a bit too broad, however a bigger refactor might be needed to properly separate
-       * update each type of data (transform, flags, etc.) */
+     * update each type of data (transform, flags, etc.) */
       if (object->is_modified()) {
         dscene->objects.tag_modified();
         dscene->object_motion_pass.tag_modified();

@@ -371,6 +371,8 @@ ImageSingle *ImageManager::add_image_texture(unique_ptr<ImageLoader> &&loader,
     images.resize(images.size() + 1);
   }
 
+  loader->prepare_for_storage();
+
   /* Add new image. */
   unique_ptr<ImageSingle> img = make_unique<ImageSingle>();
   img->type = ImageTexture::SINGLE;

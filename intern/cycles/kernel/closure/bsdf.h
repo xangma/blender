@@ -222,6 +222,10 @@ ccl_device_inline int bsdf_sample(KernelGlobals kg,
       label = bsdf_microfacet_beckmann_sample(
           kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
       break;
+    case CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID:
+      label = bsdf_ocean_unresolved_reflection_sample(
+          kg, sc, Ng, sd->wi, rand, eval, wo, pdf, sampled_roughness, eta);
+      break;
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       label = bsdf_ashikhmin_shirley_sample(
           sc, Ng, sd->wi, rand_xy, eval, wo, pdf, sampled_roughness);
@@ -356,6 +360,12 @@ ccl_device_inline void bsdf_roughness_eta(const ccl_private ShaderClosure *sc,
       *eta = (bsdf_is_transmission(sc, wo)) ? bsdf->ior : 1.0f;
       break;
     }
+    case CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID: {
+      const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
+      *roughness = make_float2(bsdf->alpha_x, bsdf->alpha_y);
+      *eta = 1.0f;
+      break;
+    }
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID: {
       const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
       *roughness = make_float2(bsdf->alpha_x, bsdf->alpha_y);
@@ -458,6 +468,11 @@ ccl_device_inline int bsdf_label(const KernelGlobals kg,
       const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
       label = ((bsdf_is_transmission(sc, wo)) ? LABEL_TRANSMIT : LABEL_REFLECT) |
               ((bsdf_microfacet_eval_flag(bsdf)) ? LABEL_GLOSSY : LABEL_SINGULAR);
+      break;
+    }
+    case CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID: {
+      const ccl_private MicrofacetBsdf *bsdf = (const ccl_private MicrofacetBsdf *)sc;
+      label = LABEL_REFLECT | ((bsdf_microfacet_eval_flag(bsdf)) ? LABEL_GLOSSY : LABEL_SINGULAR);
       break;
     }
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
@@ -571,6 +586,9 @@ ccl_device_inline
     case CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID:
       eval = bsdf_microfacet_beckmann_eval(kg, sc, sd->wi, wo, pdf);
       break;
+    case CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID:
+      eval = bsdf_ocean_unresolved_reflection_eval(kg, sc, sd->N, sd->wi, wo, pdf);
+      break;
     case CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID:
       eval = bsdf_ashikhmin_shirley_eval(sc, sd->wi, wo, pdf);
       break;
@@ -635,6 +653,7 @@ ccl_device void bsdf_blur(ccl_private ShaderClosure *sc, const float roughness)
     case CLOSURE_BSDF_MICROFACET_BECKMANN_ID:
     case CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID:
     case CLOSURE_BSDF_MICROFACET_BECKMANN_GLASS_ID:
+    case CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID:
       /* TODO: Recompute energy preservation after blur? */
       bsdf_microfacet_blur(sc, roughness);
       break;

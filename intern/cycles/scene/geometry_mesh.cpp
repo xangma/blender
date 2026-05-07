@@ -19,15 +19,30 @@
 #include "scene/shader.h"
 #include "scene/shader_nodes.h"
 
+#include "util/log.h"
 #include "util/progress.h"
+#include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
+
+static bool ocean_camera_lod_profile_enabled()
+{
+  const char *value = std::getenv("BLENDER_OCEAN_CAMERA_LOD_PROFILE");
+  return value != nullptr && value[0] != '\0' && value[0] != '0';
+}
+
+static bool mesh_is_ocean_profile_target(const Mesh *mesh)
+{
+  return mesh != nullptr && mesh->ocean_modifier_active;
+}
 
 void GeometryManager::device_update_mesh(Device * /*unused*/,
                                          DeviceScene *dscene,
                                          Scene *scene,
                                          Progress &progress)
 {
+  const bool profile_enabled = ocean_camera_lod_profile_enabled();
+  const double stage_start = profile_enabled ? time_dt() : 0.0;
   /* Count. */
   size_t vert_size = 0;
   size_t tri_size = 0;
@@ -37,6 +52,9 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
   size_t curve_segment_size = 0;
 
   size_t point_size = 0;
+  size_t ocean_mesh_count = 0;
+  size_t ocean_vert_size = 0;
+  size_t ocean_tri_size = 0;
 
   for (Geometry *geom : scene->geometry) {
     if (geom->is_mesh() || geom->is_volume()) {
@@ -44,6 +62,11 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
 
       vert_size += mesh->verts.size();
       tri_size += mesh->num_triangles();
+      if (mesh_is_ocean_profile_target(mesh)) {
+        ocean_mesh_count++;
+        ocean_vert_size += mesh->verts.size();
+        ocean_tri_size += mesh->num_triangles();
+      }
     }
     else if (geom->is_hair()) {
       Hair *hair = static_cast<Hair *>(geom);
@@ -62,6 +85,7 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
   if (tri_size != 0) {
     /* normals */
     progress.set_status("Updating Mesh", "Computing normals");
+    const double pack_start = profile_enabled ? time_dt() : 0.0;
 
     packed_float3 *tri_verts = dscene->tri_verts.alloc(vert_size);
     uint *tri_shader = dscene->tri_shader.alloc(tri_size);
@@ -73,6 +97,8 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
     for (Geometry *geom : scene->geometry) {
       if (geom->is_mesh() || geom->is_volume()) {
         Mesh *mesh = static_cast<Mesh *>(geom);
+        const bool profile_mesh = profile_enabled && mesh_is_ocean_profile_target(mesh);
+        const double mesh_pack_start = profile_mesh ? time_dt() : 0.0;
 
         if (mesh->shader_is_modified() || mesh->smooth_is_modified() ||
             mesh->triangles_is_modified() || copy_all_data)
@@ -87,15 +113,36 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
         if (progress.get_cancel()) {
           return;
         }
+
+        if (profile_mesh) {
+          VLOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='" << mesh->name
+                    << "' stage=cycles_device_update_mesh_pack mode="
+                    << (mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference")
+                    << " pack_s=" << (time_dt() - mesh_pack_start) << " verts="
+                    << mesh->verts.size() << " tris=" << mesh->num_triangles() << " copy_all="
+                    << int(copy_all_data) << " verts_modified=" << int(mesh->verts_is_modified())
+                    << " triangles_modified=" << int(mesh->triangles_is_modified())
+                    << " shader_modified=" << int(mesh->shader_is_modified());
+        }
       }
     }
 
     /* vertex coordinates */
     progress.set_status("Updating Mesh", "Copying Mesh to device");
+    const double copy_to_device_start = profile_enabled ? time_dt() : 0.0;
 
     dscene->tri_verts.copy_to_device_if_modified();
     dscene->tri_shader.copy_to_device_if_modified();
     dscene->tri_vindex.copy_to_device_if_modified();
+
+    if (profile_enabled && ocean_mesh_count > 0) {
+      VLOG_INFO << "[OCEAN_CAMERA_LOD_PROFILE] object='scene' stage=cycles_device_update_mesh total_s="
+                << (time_dt() - stage_start) << " pack_s=" << (time_dt() - pack_start)
+                << " copy_to_device_s=" << (time_dt() - copy_to_device_start)
+                << " ocean_meshes=" << ocean_mesh_count << " ocean_verts=" << ocean_vert_size
+                << " ocean_tris=" << ocean_tri_size << " scene_verts=" << vert_size
+                << " scene_tris=" << tri_size;
+    }
   }
 
   if (curve_segment_size != 0) {
