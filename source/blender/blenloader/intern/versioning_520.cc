@@ -580,6 +580,23 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     FOREACH_NODETREE_END;
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 27)) {
+    for (Object &object : bmain->objects) {
+      for (ModifierData &md : object.modifiers) {
+        if (md.type != eModifierType_Ocean) {
+          continue;
+        }
+
+        OceanModifierData &omd = reinterpret_cast<OceanModifierData &>(md);
+        omd.lod_levels = 5;
+        omd.lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+        omd.lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+        omd.lod_pixel_error = 0.5f;
+        omd.lod_camera_full_spectrum_radius = 0.0f;
+      }
+    }
+  }
+
   /**
    * Always bump subversion in BKE_blender_version.h when adding versioning
    * code here, and wrap it inside a MAIN_VERSION_FILE_ATLEAST check.
