@@ -20,6 +20,7 @@
 #include "DNA_modifier_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rand.h"
@@ -488,32 +489,81 @@ static void ocean_split_level_update_normals(OceanSplitLevel &level,
   }
 }
 
+struct OceanSplitMomentAccumulator {
+  float cumulative_disp_variance[3] = {0.0f, 0.0f, 0.0f};
+  float cumulative_slope_moment[3] = {0.0f, 0.0f, 0.0f};
+};
+
+static OceanSplitMomentAccumulator ocean_split_level_moments_from_x_range(
+    const OceanSplitLevel &level, const blender::IndexRange x_range, const float inv_sample_count)
+{
+  const int size_y = level.size_y;
+  const float *disp_x_data = level.disp_x;
+  const float *disp_y_data = level.disp_y;
+  const float *disp_z_data = level.disp_z;
+  const float *normal_x_data = level.normal_x;
+  const float *normal_y_data = level.normal_y;
+  const float *normal_z_data = level.normal_z;
+
+  OceanSplitMomentAccumulator accumulator{};
+  for (const int64_t x_i : x_range) {
+    const int x = int(x_i);
+    const size_t row_start = size_t(x) * size_t(size_y);
+    for (int y = 0; y < size_y; y++) {
+      const size_t index = row_start + size_t(y);
+      const float disp_x = disp_x_data[index];
+      const float disp_y = disp_y_data[index];
+      const float disp_z = disp_z_data[index];
+
+      accumulator.cumulative_disp_variance[0] += disp_x * disp_x * inv_sample_count;
+      accumulator.cumulative_disp_variance[1] += disp_y * disp_y * inv_sample_count;
+      accumulator.cumulative_disp_variance[2] += disp_z * disp_z * inv_sample_count;
+
+      const float normal_x = normal_x_data[index];
+      const float normal_y = normal_y_data[index];
+      const float normal_z = normal_z_data[index];
+      const float safe_normal_y = (fabsf(normal_y) > 1.0e-6f) ? normal_y :
+                                                                    ((normal_y < 0.0f) ? -1.0e-6f :
+                                                                                         1.0e-6f);
+      const float slope_x = -normal_x / safe_normal_y;
+      const float slope_z = -normal_z / safe_normal_y;
+      accumulator.cumulative_slope_moment[0] += slope_x * slope_x * inv_sample_count;
+      accumulator.cumulative_slope_moment[1] += slope_x * slope_z * inv_sample_count;
+      accumulator.cumulative_slope_moment[2] += slope_z * slope_z * inv_sample_count;
+    }
+  }
+  return accumulator;
+}
+
 static void ocean_split_level_update_moments_from_normals(OceanSplitLevel &level,
                                                           const float inv_sample_count)
 {
-  for (int x = 0; x < level.size_x; x++) {
-    for (int y = 0; y < level.size_y; y++) {
-      const size_t index = ocean_split_level_index(level, x, y);
-      const float disp_x = level.disp_x[index];
-      const float disp_y = level.disp_y[index];
-      const float disp_z = level.disp_z[index];
+  const int64_t sample_count = int64_t(level.size_x) * int64_t(level.size_y);
+  if (sample_count < 32768) {
+    const OceanSplitMomentAccumulator accumulator = ocean_split_level_moments_from_x_range(
+        level, blender::IndexRange(level.size_x), inv_sample_count);
+    add_v3_v3(level.cumulative_disp_variance, accumulator.cumulative_disp_variance);
+    add_v3_v3(level.cumulative_slope_moment, accumulator.cumulative_slope_moment);
+    return;
+  }
 
-      level.cumulative_disp_variance[0] += disp_x * disp_x * inv_sample_count;
-      level.cumulative_disp_variance[1] += disp_y * disp_y * inv_sample_count;
-      level.cumulative_disp_variance[2] += disp_z * disp_z * inv_sample_count;
+  constexpr int chunk_size_x = 64;
+  const int chunk_count = (level.size_x + chunk_size_x - 1) / chunk_size_x;
+  blender::Array<OceanSplitMomentAccumulator> accumulators(chunk_count);
+  blender::threading::parallel_for(
+      blender::IndexRange(chunk_count), 1, [&](const blender::IndexRange chunk_range) {
+        for (const int64_t chunk_i : chunk_range) {
+          const int chunk_index = int(chunk_i);
+          const int x_start = chunk_index * chunk_size_x;
+          const int x_size = std::min(chunk_size_x, level.size_x - x_start);
+          accumulators[chunk_index] = ocean_split_level_moments_from_x_range(
+              level, blender::IndexRange(x_start, x_size), inv_sample_count);
+        }
+      });
 
-      const float normal[3] = {
-          level.normal_x[index], level.normal_y[index], level.normal_z[index]};
-
-      const float safe_normal_y = (fabsf(normal[1]) > 1.0e-6f) ? normal[1] :
-                                                              ((normal[1] < 0.0f) ? -1.0e-6f :
-                                                                                     1.0e-6f);
-      const float slope_x = -normal[0] / safe_normal_y;
-      const float slope_z = -normal[2] / safe_normal_y;
-      level.cumulative_slope_moment[0] += slope_x * slope_x * inv_sample_count;
-      level.cumulative_slope_moment[1] += slope_x * slope_z * inv_sample_count;
-      level.cumulative_slope_moment[2] += slope_z * slope_z * inv_sample_count;
-    }
+  for (const OceanSplitMomentAccumulator &accumulator : accumulators) {
+    add_v3_v3(level.cumulative_disp_variance, accumulator.cumulative_disp_variance);
+    add_v3_v3(level.cumulative_slope_moment, accumulator.cumulative_slope_moment);
   }
 }
 
@@ -532,8 +582,8 @@ static void ocean_split_level_update_normals_and_moments(const Ocean *o, OceanSp
   const float inv_dz = (cell_z > 1.0e-12f) ? (0.5f / cell_z) : 0.0f;
   const float inv_sample_count = 1.0f / float(size_t(level.size_x) * size_t(level.size_y));
 
-  /* Keep moment accumulation in the original x/y order so leaf decisions do not depend on
-   * thread scheduling. The derivative and normal calculation is independent per sample. */
+  /* Keep moment accumulation deterministic with fixed x-row chunks so leaf decisions do not depend
+   * on thread scheduling. The derivative and normal calculation is independent per sample. */
   ocean_split_level_update_normals(level, inv_dx, inv_dz);
   ocean_split_level_update_moments_from_normals(level, inv_sample_count);
 }
@@ -575,7 +625,6 @@ static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, cons
 
   ocean_split_copy_base_level(o);
 
-  const size_t size = size_t(o->_M) * size_t(o->_N);
   blender::threading::parallel_for(
       blender::IndexRange(1, std::max(o->_split_levels_num - 1, 0)),
       1,
@@ -610,21 +659,6 @@ static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, cons
           }
 
           ocean_split_level_update_normals_and_moments(o, level);
-        }
-      });
-
-  const OceanSplitLevel &base_level = o->_split_levels[0];
-  blender::threading::parallel_for(
-      blender::IndexRange(size), 4096, [&](const blender::IndexRange range) {
-        for (const int64_t index_i : range) {
-          const size_t index = size_t(index_i);
-          if (o->_do_disp_y) {
-            o->_disp_y[index] = double(base_level.disp_y[index]);
-          }
-          if (o->_do_chop) {
-            o->_disp_x[index] = double(base_level.disp_x[index]);
-            o->_disp_z[index] = double(base_level.disp_z[index]);
-          }
         }
       });
 
