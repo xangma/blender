@@ -49,6 +49,8 @@ CCL_NAMESPACE_BEGIN
 #define ID_NONE (0.0f)
 #define PASS_UNUSED (~0)
 #define LIGHTGROUP_NONE (~0)
+#define OCEAN_SPLIT_MAX_LEVELS 16
+#define OCEAN_SPLIT_MOTION_TEXTURE_STEPS 3
 
 #define LIGHT_LINK_SET_MAX 64
 #define LIGHT_LINK_MASK_ALL (~uint64_t(0))
@@ -897,6 +899,12 @@ enum AttributeStandard {
   ATTR_STD_POINTINESS,
   ATTR_STD_RANDOM_PER_ISLAND,
   ATTR_STD_SHADOW_TRANSPARENCY,
+  ATTR_STD_OCEAN_REF_COORD,
+  ATTR_STD_OCEAN_REF_UV,
+  ATTR_STD_OCEAN_GEOMETRY_NORMAL,
+  ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE,
+  ATTR_STD_OCEAN_VISIBLE_RESIDUAL_SLOPE,
+  ATTR_STD_OCEAN_UNRESOLVED_SLOPE_COVARIANCE,
   ATTR_STD_NUM,
 
   ATTR_STD_NOT_FOUND = ~0
@@ -1526,6 +1534,19 @@ struct KernelObject {
   float ao_distance;
 
   int lightgroup;
+
+  int ocean_split_level_count;
+  float ocean_split_min_wavelength;
+  int ocean_split_resolution_x[OCEAN_SPLIT_MAX_LEVELS];
+  int ocean_split_resolution_y[OCEAN_SPLIT_MAX_LEVELS];
+  float ocean_split_cell_size_x[OCEAN_SPLIT_MAX_LEVELS];
+  float ocean_split_cell_size_z[OCEAN_SPLIT_MAX_LEVELS];
+  int ocean_split_slope_texture_slots[OCEAN_SPLIT_MAX_LEVELS];
+  int ocean_split_slope_texture_slots_pre[OCEAN_SPLIT_MAX_LEVELS];
+  int ocean_split_slope_texture_slots_post[OCEAN_SPLIT_MAX_LEVELS];
+  packed_float3 ocean_split_cumulative_slope_moments[OCEAN_SPLIT_MAX_LEVELS];
+  packed_float3 ocean_split_cumulative_slope_moments_pre[OCEAN_SPLIT_MAX_LEVELS];
+  packed_float3 ocean_split_cumulative_slope_moments_post[OCEAN_SPLIT_MAX_LEVELS];
 
   uint visibility;
   int primitive_type;

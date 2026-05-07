@@ -6,6 +6,7 @@
 
 #include "kernel/closure/alloc.h"
 #include "kernel/closure/bsdf.h"
+#include "kernel/closure/bsdf_ocean.h"
 #include "kernel/closure/bsdf_util.h"
 #include "kernel/closure/bssrdf.h"
 #include "kernel/closure/emissive.h"
@@ -35,6 +36,254 @@ ccl_device_inline int svm_node_closure_bsdf_skip(KernelGlobals kg, int offset, c
   }
 
   return offset;
+}
+
+ccl_device_inline bool svm_ocean_unresolved_covariance(
+    KernelGlobals kg, const ccl_private ShaderData *sd, ccl_private float3 *r_covariance)
+{
+  return ocean_split_unresolved_covariance(kg, sd, r_covariance);
+}
+
+ccl_device_inline void svm_ocean_tangent_basis(KernelGlobals kg,
+                                               const ccl_private ShaderData *sd,
+                                               const float3 N,
+                                               ccl_private float3 *r_T,
+                                               ccl_private float3 *r_B)
+{
+  ocean_split_tangent_basis(kg, sd, N, r_T, r_B);
+}
+
+ccl_device_inline bool svm_ocean_visible_split_normal(KernelGlobals kg,
+                                                      const ccl_private ShaderData *sd,
+                                                      ccl_private float3 *r_N)
+{
+  return ocean_split_visible_normal(kg, sd, r_N);
+}
+
+ccl_device_inline float3 svm_ocean_shading_normal(KernelGlobals kg,
+                                                  const ccl_private ShaderData *sd,
+                                                  const bool use_explicit_normal,
+                                                  const float3 material_normal)
+{
+  const float3 fallback = safe_normalize_fallback(material_normal, sd->N);
+
+  float3 ocean_visible_normal;
+  if (!svm_ocean_visible_split_normal(kg, sd, &ocean_visible_normal)) {
+    return fallback;
+  }
+
+  if (!use_explicit_normal || dot(sd->N, fallback) >= 0.9999f) {
+    return ocean_visible_normal;
+  }
+
+  return ocean_split_retarget_material_normal(kg, sd, sd->N, fallback, ocean_visible_normal);
+}
+
+ccl_device_inline void svm_ocean_microfacet_material_covariance(
+    KernelGlobals kg,
+    const ccl_private ShaderData *sd,
+    const ccl_private MicrofacetBsdf *bsdf,
+    ccl_private float3 *r_ocean_T,
+    ccl_private float3 *r_ocean_B,
+    ccl_private float *r_material_xx,
+    ccl_private float *r_material_xz,
+    ccl_private float *r_material_zz)
+{
+  svm_ocean_tangent_basis(kg, sd, bsdf->N, r_ocean_T, r_ocean_B);
+
+  const float material_alpha_x2 = sqr(bsdf->alpha_x);
+  const float material_alpha_y2 = sqr(bsdf->alpha_y);
+
+  *r_material_xx = material_alpha_x2;
+  *r_material_xz = 0.0f;
+  *r_material_zz = material_alpha_y2;
+
+  float3 material_T = bsdf->T - dot(bsdf->T, bsdf->N) * bsdf->N;
+  if (!is_zero(material_T)) {
+    material_T = normalize(material_T);
+    float tx = dot(material_T, *r_ocean_T);
+    float tz = dot(material_T, *r_ocean_B);
+    const float tangent_len = sqrtf(fmaxf(tx * tx + tz * tz, 1.0e-20f));
+    tx /= tangent_len;
+    tz /= tangent_len;
+
+    *r_material_xx = tx * tx * material_alpha_x2 + tz * tz * material_alpha_y2;
+    *r_material_xz = tx * tz * (material_alpha_x2 - material_alpha_y2);
+    *r_material_zz = tz * tz * material_alpha_x2 + tx * tx * material_alpha_y2;
+  }
+  else if (fabsf(bsdf->alpha_x - bsdf->alpha_y) <= 1.0e-8f) {
+    *r_material_xx = material_alpha_x2;
+    *r_material_xz = 0.0f;
+    *r_material_zz = material_alpha_x2;
+  }
+}
+
+ccl_device_inline void svm_ocean_microfacet_parameters_from_covariance(
+    const float3 ocean_T,
+    const float3 ocean_B,
+    const float covariance_xx,
+    const float covariance_xz,
+    const float covariance_zz,
+    ccl_private float3 *r_T,
+    ccl_private float *r_alpha_x,
+    ccl_private float *r_alpha_y)
+{
+  const float trace = covariance_xx + covariance_zz;
+  const float diff = covariance_xx - covariance_zz;
+  const float discriminant = sqrtf(fmaxf(diff * diff + 4.0f * covariance_xz * covariance_xz, 0.0f));
+  const float variance_x = fmaxf(0.0f, 0.5f * (trace + discriminant));
+  const float variance_y = fmaxf(0.0f, 0.5f * (trace - discriminant));
+  const float angle = 0.5f * atan2f(2.0f * covariance_xz, diff);
+
+  *r_T = safe_normalize_fallback(cosf(angle) * ocean_T + sinf(angle) * ocean_B, ocean_T);
+  *r_alpha_x = sqrtf(variance_x);
+  *r_alpha_y = sqrtf(variance_y);
+}
+
+struct OceanUnresolvedMicrofacetLayer {
+  float weight;
+  float3 T;
+  float alpha_x;
+  float alpha_y;
+};
+
+ccl_device_inline bool svm_ocean_microfacet_build_ocean_reflection_closure(
+    KernelGlobals kg,
+    const ccl_private ShaderData *sd,
+    const ccl_private MicrofacetBsdf *base_bsdf,
+    ccl_private MicrofacetBsdf *r_ocean_bsdf)
+{
+  float3 ocean_covariance;
+  if (!svm_ocean_unresolved_covariance(kg, sd, &ocean_covariance)) {
+    return false;
+  }
+
+  float3 ocean_T, ocean_B;
+  float material_xx, material_xz, material_zz;
+  svm_ocean_microfacet_material_covariance(
+      kg, sd, base_bsdf, &ocean_T, &ocean_B, &material_xx, &material_xz, &material_zz);
+
+  const float total_xx = material_xx + ocean_covariance.x;
+  const float total_xz = material_xz + ocean_covariance.y;
+  const float total_zz = material_zz + ocean_covariance.z;
+
+  *r_ocean_bsdf = *base_bsdf;
+  svm_ocean_microfacet_parameters_from_covariance(
+      ocean_T,
+      ocean_B,
+      total_xx,
+      total_xz,
+      total_zz,
+      &r_ocean_bsdf->T,
+      &r_ocean_bsdf->alpha_x,
+      &r_ocean_bsdf->alpha_y);
+
+  /* Dedicated ocean closure:
+   * represent the resolved material lobe convolved with the omitted subpixel ocean band as one
+   * Gaussian-slope reflection closure in the canonical ocean tangent frame. The visible mean
+   * normal still comes from the split-spectrum geometry+residual path; this closure only replaces
+   * how the unresolved statistics are rendered around that mean. */
+  return (r_ocean_bsdf->alpha_x * r_ocean_bsdf->alpha_y > 1.0e-8f);
+}
+
+ccl_device_inline bool svm_ocean_microfacet_build_unresolved_layer(
+    KernelGlobals kg,
+    const ccl_private ShaderData *sd,
+    const ccl_private MicrofacetBsdf *base_bsdf,
+    ccl_private OceanUnresolvedMicrofacetLayer *r_layer)
+{
+  float3 ocean_covariance;
+  if (!svm_ocean_unresolved_covariance(kg, sd, &ocean_covariance)) {
+    return false;
+  }
+
+  const float ocean_trace = ocean_covariance.x + ocean_covariance.z;
+  if (ocean_trace <= 1.0e-8f) {
+    return false;
+  }
+
+  float3 ocean_T, ocean_B;
+  float material_xx, material_xz, material_zz;
+  svm_ocean_microfacet_material_covariance(
+      kg, sd, base_bsdf, &ocean_T, &ocean_B, &material_xx, &material_xz, &material_zz);
+
+  const float material_trace = material_xx + material_zz;
+  float mix_weight = ocean_trace / fmaxf(material_trace + ocean_trace, 1.0e-8f);
+  if (mix_weight <= 0.01f) {
+    return false;
+  }
+
+  mix_weight = clamp(mix_weight, 0.02f, 0.98f);
+  const float layer_xx = material_xx + ocean_covariance.x / mix_weight;
+  const float layer_xz = material_xz + ocean_covariance.y / mix_weight;
+  const float layer_zz = material_zz + ocean_covariance.z / mix_weight;
+
+  r_layer->weight = mix_weight;
+  svm_ocean_microfacet_parameters_from_covariance(
+      ocean_T, ocean_B, layer_xx, layer_xz, layer_zz, &r_layer->T, &r_layer->alpha_x, &r_layer->alpha_y);
+  return true;
+}
+
+ccl_device_inline void svm_ocean_microfacet_apply_unresolved_anisotropic(
+    KernelGlobals kg, ccl_private ShaderData *sd, ccl_private MicrofacetBsdf *bsdf)
+{
+  float3 ocean_covariance;
+  if (!svm_ocean_unresolved_covariance(kg, sd, &ocean_covariance)) {
+    return;
+  }
+
+  /* Treat the unresolved ocean band as a Beckmann-equivalent slope covariance in the canonical
+   * ocean tangent frame. Material roughness is converted to the same variance space, the ocean
+   * covariance is added there, and the principal axes are written back into the existing
+   * microfacet closure. GGX and Ashikhmin still use this as an approximation, but it keeps the
+   * unresolved term tied to actual ocean slope statistics instead of a generic roughness tweak. */
+  float3 ocean_T, ocean_B;
+  float material_xx, material_xz, material_zz;
+  svm_ocean_microfacet_material_covariance(
+      kg, sd, bsdf, &ocean_T, &ocean_B, &material_xx, &material_xz, &material_zz);
+
+  const float total_xx = material_xx + ocean_covariance.x;
+  const float total_xz = material_xz + ocean_covariance.y;
+  const float total_zz = material_zz + ocean_covariance.z;
+  svm_ocean_microfacet_parameters_from_covariance(
+      ocean_T, ocean_B, total_xx, total_xz, total_zz, &bsdf->T, &bsdf->alpha_x, &bsdf->alpha_y);
+}
+
+ccl_device_inline void svm_ocean_microfacet_setup_reflective(KernelGlobals kg,
+                                                             ccl_private ShaderData *sd,
+                                                             const ClosureType type,
+                                                             ccl_private MicrofacetBsdf *bsdf,
+                                                             const Spectrum multiggx_color)
+{
+  if (type == CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID) {
+    sd->flag |= bsdf_ocean_unresolved_reflection_setup(bsdf);
+    return;
+  }
+
+  if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID) {
+    sd->flag |= bsdf_microfacet_beckmann_setup(bsdf);
+    return;
+  }
+
+  if (type == CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID) {
+    sd->flag |= bsdf_ashikhmin_shirley_setup(bsdf);
+    return;
+  }
+
+  sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
+  if (type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) {
+    bsdf_microfacet_setup_fresnel_constant(kg, bsdf, sd, multiggx_color);
+  }
+}
+
+ccl_device_inline void svm_ocean_microfacet_assign_parameters(
+    ccl_private MicrofacetBsdf *bsdf, const ccl_private MicrofacetBsdf *parameters)
+{
+  bsdf->N = parameters->N;
+  bsdf->alpha_x = parameters->alpha_x;
+  bsdf->alpha_y = parameters->alpha_y;
+  bsdf->ior = parameters->ior;
+  bsdf->T = parameters->T;
 }
 
 template<uint node_feature_mask, ShaderType shader_type>
@@ -82,8 +331,9 @@ ccl_device
     return svm_node_closure_bsdf_skip(kg, offset, type);
   }
 
-  float3 N = stack_valid(data_node.x) ? stack_load_float3(stack, data_node.x) : sd->N;
-  N = safe_normalize_fallback(N, sd->N);
+  const bool use_explicit_normal = stack_valid(data_node.x);
+  float3 N = use_explicit_normal ? stack_load_float3(stack, data_node.x) : sd->N;
+  N = svm_ocean_shading_normal(kg, sd, use_explicit_normal, N);
 
   const float param1 = (stack_valid(param1_offset)) ? stack_load_float(stack, param1_offset) :
                                                       __uint_as_float(node.z);
@@ -169,8 +419,8 @@ ccl_device
       const float3 valid_reflection_N = maybe_ensure_valid_specular_reflection(sd, N);
       float3 coat_normal = stack_valid(coat_normal_offset) ?
                                stack_load_float3(stack, coat_normal_offset) :
-                               sd->N;
-      coat_normal = safe_normalize_fallback(coat_normal, sd->N);
+                               N;
+      coat_normal = safe_normalize_fallback(coat_normal, N);
 
       // get the base color
       const uint4 data_base_color = read_node(kg, &offset);
@@ -269,6 +519,7 @@ ccl_device
             bsdf->ior = coat_ior;
 
             bsdf->alpha_x = bsdf->alpha_y = sqr(coat_roughness);
+            svm_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
             /* setup bsdf */
             sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
@@ -331,6 +582,7 @@ ccl_device
             bsdf->T = T;
             bsdf->alpha_x = alpha_x;
             bsdf->alpha_y = alpha_y;
+            svm_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
             fresnel->f0 = rgb_to_spectrum(clamped_base_color);
             const Spectrum f82 = min(specular_tint, one_spectrum());
@@ -361,7 +613,6 @@ ccl_device
 
             bsdf->alpha_x = bsdf->alpha_y = sqr(roughness);
             bsdf->ior = (sd->flag & SD_BACKFACING) ? 1.0f / ior : ior;
-
             fresnel->f0 = make_float3(F0_from_ior(ior)) * specular_tint;
             fresnel->f90 = one_spectrum();
             fresnel->exponent = -ior;
@@ -396,19 +647,36 @@ ccl_device
 
       /* Specular component */
       if (reflective_caustics && (eta != 1.0f || thinfilm_thickness > 0.1f)) {
+        MicrofacetBsdf base_bsdf = {};
+        base_bsdf.N = valid_reflection_N;
+        base_bsdf.ior = eta;
+        base_bsdf.T = T;
+        base_bsdf.alpha_x = alpha_x;
+        base_bsdf.alpha_y = alpha_y;
+
+        OceanUnresolvedMicrofacetLayer unresolved_layer;
+        const bool use_generic_unresolved_layer =
+            (sd->num_closure_left >= 2) &&
+            svm_ocean_microfacet_build_unresolved_layer(kg, sd, &base_bsdf, &unresolved_layer);
+
+        Spectrum combined_albedo = zero_spectrum();
+        Spectrum base_weight = weight;
+        if (use_generic_unresolved_layer) {
+          base_weight *= (1.0f - unresolved_layer.weight);
+        }
+        else {
+          svm_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, &base_bsdf);
+        }
+
         ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-            sd, sizeof(MicrofacetBsdf), weight);
+            sd, sizeof(MicrofacetBsdf), base_weight);
         ccl_private FresnelGeneralizedSchlick *fresnel =
             (bsdf != nullptr) ? (ccl_private FresnelGeneralizedSchlick *)closure_alloc_extra(
                                     sd, sizeof(FresnelGeneralizedSchlick)) :
                                 nullptr;
 
         if (bsdf && fresnel) {
-          bsdf->N = valid_reflection_N;
-          bsdf->ior = eta;
-          bsdf->T = T;
-          bsdf->alpha_x = alpha_x;
-          bsdf->alpha_y = alpha_y;
+          svm_ocean_microfacet_assign_parameters(bsdf, &base_bsdf);
 
           fresnel->f0 = f0 * specular_tint;
           fresnel->f90 = one_spectrum();
@@ -422,11 +690,44 @@ ccl_device
           sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
           const bool is_multiggx = (distribution == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
           bsdf_microfacet_setup_fresnel_generalized_schlick(kg, bsdf, sd, fresnel, is_multiggx);
+          combined_albedo += bsdf_albedo(kg, sd, (ccl_private ShaderClosure *)bsdf, true, false);
+        }
 
-          /* Attenuate lower layers */
-          const Spectrum albedo = bsdf_albedo(
-              kg, sd, (ccl_private ShaderClosure *)bsdf, true, false);
-          weight = closure_layering_weight(albedo, weight);
+        if (use_generic_unresolved_layer) {
+          ccl_private MicrofacetBsdf *unresolved_bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
+              sd, sizeof(MicrofacetBsdf), weight * unresolved_layer.weight);
+          ccl_private FresnelGeneralizedSchlick *unresolved_fresnel =
+              (unresolved_bsdf != nullptr) ?
+                  (ccl_private FresnelGeneralizedSchlick *)closure_alloc_extra(
+                      sd, sizeof(FresnelGeneralizedSchlick)) :
+                  nullptr;
+
+          if (unresolved_bsdf && unresolved_fresnel) {
+            unresolved_bsdf->N = valid_reflection_N;
+            unresolved_bsdf->ior = eta;
+            unresolved_bsdf->T = unresolved_layer.T;
+            unresolved_bsdf->alpha_x = unresolved_layer.alpha_x;
+            unresolved_bsdf->alpha_y = unresolved_layer.alpha_y;
+
+            unresolved_fresnel->f0 = f0 * specular_tint;
+            unresolved_fresnel->f90 = one_spectrum();
+            unresolved_fresnel->exponent = -eta;
+            unresolved_fresnel->reflection_tint = one_spectrum();
+            unresolved_fresnel->transmission_tint = zero_spectrum();
+            unresolved_fresnel->thin_film.thickness = thinfilm_thickness;
+            unresolved_fresnel->thin_film.ior = thinfilm_ior;
+
+            sd->flag |= bsdf_microfacet_ggx_setup(unresolved_bsdf);
+            const bool is_multiggx = (distribution == CLOSURE_BSDF_MICROFACET_MULTI_GGX_GLASS_ID);
+            bsdf_microfacet_setup_fresnel_generalized_schlick(
+                kg, unresolved_bsdf, sd, unresolved_fresnel, is_multiggx);
+            combined_albedo += bsdf_albedo(
+                kg, sd, (ccl_private ShaderClosure *)unresolved_bsdf, true, false);
+          }
+        }
+
+        if (!is_zero(combined_albedo)) {
+          weight = closure_layering_weight(combined_albedo, weight);
         }
       }
 
@@ -554,6 +855,7 @@ ccl_device
         bsdf->T = T;
         bsdf->alpha_x = alpha_x;
         bsdf->alpha_y = alpha_y;
+        svm_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, bsdf);
 
         const ClosureType distribution = (ClosureType)node.w;
         /* Setup BSDF */
@@ -608,59 +910,92 @@ ccl_device
       }
 #endif
       const Spectrum weight = closure_weight * mix_weight;
-      ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
-          sd, sizeof(MicrofacetBsdf), weight);
-
-      if (!bsdf) {
-        break;
-      }
-
       const float roughness = sqr(saturatef(param1));
+      const float3 reflection_N = maybe_ensure_valid_specular_reflection(sd, N);
+      const Spectrum multiggx_color = (type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) ?
+                                          max(rgb_to_spectrum(stack_load_float3(stack, data_node.z)),
+                                              zero_spectrum()) :
+                                          zero_spectrum();
 
-      bsdf->N = maybe_ensure_valid_specular_reflection(sd, N);
-      bsdf->ior = 1.0f;
+      MicrofacetBsdf base_bsdf = {};
+      base_bsdf.N = reflection_N;
+      base_bsdf.ior = 1.0f;
 
       /* compute roughness */
       const float anisotropy = clamp(param2, -0.99f, 0.99f);
       if (data_node.w == SVM_STACK_INVALID || fabsf(anisotropy) <= 1e-4f) {
         /* Isotropic case. */
-        bsdf->T = zero_float3();
-        bsdf->alpha_x = roughness;
-        bsdf->alpha_y = roughness;
+        base_bsdf.T = zero_float3();
+        base_bsdf.alpha_x = roughness;
+        base_bsdf.alpha_y = roughness;
       }
       else {
-        bsdf->T = stack_load_float3(stack, data_node.w);
+        base_bsdf.T = stack_load_float3(stack, data_node.w);
 
         /* rotate tangent */
         const float rotation = stack_load_float(stack, data_node.y);
         if (rotation != 0.0f) {
-          bsdf->T = rotate_around_axis(bsdf->T, bsdf->N, rotation * M_2PI_F);
+          base_bsdf.T = rotate_around_axis(base_bsdf.T, base_bsdf.N, rotation * M_2PI_F);
         }
 
         if (anisotropy < 0.0f) {
-          bsdf->alpha_x = roughness / (1.0f + anisotropy);
-          bsdf->alpha_y = roughness * (1.0f + anisotropy);
+          base_bsdf.alpha_x = roughness / (1.0f + anisotropy);
+          base_bsdf.alpha_y = roughness * (1.0f + anisotropy);
         }
         else {
-          bsdf->alpha_x = roughness * (1.0f - anisotropy);
-          bsdf->alpha_y = roughness / (1.0f - anisotropy);
+          base_bsdf.alpha_x = roughness * (1.0f - anisotropy);
+          base_bsdf.alpha_y = roughness / (1.0f - anisotropy);
         }
       }
 
-      /* setup bsdf */
-      if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID) {
-        sd->flag |= bsdf_microfacet_beckmann_setup(bsdf);
+      const ClosureType closure_type = (ClosureType)type;
+      MicrofacetBsdf ocean_bsdf = {};
+      const bool use_dedicated_ocean_closure =
+          (closure_type == CLOSURE_BSDF_MICROFACET_GGX_ID ||
+           closure_type == CLOSURE_BSDF_MICROFACET_BECKMANN_ID) &&
+          svm_ocean_microfacet_build_ocean_reflection_closure(kg, sd, &base_bsdf, &ocean_bsdf);
+
+      if (use_dedicated_ocean_closure) {
+        ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
+            sd, sizeof(MicrofacetBsdf), weight);
+        if (bsdf) {
+          svm_ocean_microfacet_assign_parameters(bsdf, &ocean_bsdf);
+          svm_ocean_microfacet_setup_reflective(
+              kg, sd, CLOSURE_BSDF_OCEAN_UNRESOLVED_REFLECTION_ID, bsdf, multiggx_color);
+        }
+        break;
       }
-      else if (type == CLOSURE_BSDF_ASHIKHMIN_SHIRLEY_ID) {
-        sd->flag |= bsdf_ashikhmin_shirley_setup(bsdf);
+
+      OceanUnresolvedMicrofacetLayer unresolved_layer;
+      const bool use_generic_unresolved_layer =
+          (sd->num_closure_left >= 2) &&
+          svm_ocean_microfacet_build_unresolved_layer(kg, sd, &base_bsdf, &unresolved_layer);
+
+      Spectrum base_weight = weight;
+      if (use_generic_unresolved_layer) {
+        base_weight *= (1.0f - unresolved_layer.weight);
       }
       else {
-        sd->flag |= bsdf_microfacet_ggx_setup(bsdf);
-        if (type == CLOSURE_BSDF_MICROFACET_MULTI_GGX_ID) {
-          kernel_assert(stack_valid(data_node.z));
-          const Spectrum color = max(rgb_to_spectrum(stack_load_float3(stack, data_node.z)),
-                                     zero_spectrum());
-          bsdf_microfacet_setup_fresnel_constant(kg, bsdf, sd, color);
+        svm_ocean_microfacet_apply_unresolved_anisotropic(kg, sd, &base_bsdf);
+      }
+
+      ccl_private MicrofacetBsdf *bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
+          sd, sizeof(MicrofacetBsdf), base_weight);
+      if (bsdf) {
+        svm_ocean_microfacet_assign_parameters(bsdf, &base_bsdf);
+        svm_ocean_microfacet_setup_reflective(kg, sd, closure_type, bsdf, multiggx_color);
+      }
+
+      if (use_generic_unresolved_layer) {
+        ccl_private MicrofacetBsdf *unresolved_bsdf = (ccl_private MicrofacetBsdf *)bsdf_alloc(
+            sd, sizeof(MicrofacetBsdf), weight * unresolved_layer.weight);
+        if (unresolved_bsdf) {
+          svm_ocean_microfacet_assign_parameters(unresolved_bsdf, &base_bsdf);
+          unresolved_bsdf->T = unresolved_layer.T;
+          unresolved_bsdf->alpha_x = unresolved_layer.alpha_x;
+          unresolved_bsdf->alpha_y = unresolved_layer.alpha_y;
+          svm_ocean_microfacet_setup_reflective(
+              kg, sd, closure_type, unresolved_bsdf, multiggx_color);
         }
       }
 
@@ -689,7 +1024,6 @@ ccl_device
         bsdf->alpha_x = roughness;
         bsdf->alpha_y = roughness;
         bsdf->ior = eta;
-
         if (type == CLOSURE_BSDF_MICROFACET_BECKMANN_REFRACTION_ID) {
           sd->flag |= bsdf_microfacet_beckmann_refraction_setup(bsdf);
         }
@@ -729,7 +1063,6 @@ ccl_device
         const float ior = fmaxf(param2, 1e-5f);
         bsdf->ior = (sd->flag & SD_BACKFACING) ? 1.0f / ior : ior;
         bsdf->alpha_x = bsdf->alpha_y = sqr(saturatef(param1));
-
         fresnel->f0 = make_float3(F0_from_ior(ior));
         fresnel->f90 = one_spectrum();
         fresnel->exponent = -ior;
