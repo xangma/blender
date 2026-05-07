@@ -93,6 +93,10 @@ typedef struct OceanSplitRuntimeReadScope {
   const struct Ocean *ocean;
 } OceanSplitRuntimeReadScope;
 
+typedef struct OceanRuntimeReadScope {
+  const struct Ocean *ocean;
+} OceanRuntimeReadScope;
+
 typedef struct OceanCache {
   struct ImBuf **ibufs_disp;
   struct ImBuf **ibufs_foam;
@@ -176,6 +180,12 @@ float BKE_ocean_jminus_to_foam(float jminus, float coverage);
  * Sampling the ocean surface.
  */
 void BKE_ocean_eval_uv(struct Ocean *oc, struct OceanResult *ocr, float u, float v);
+bool BKE_ocean_runtime_read_begin(const struct Ocean *oc, struct OceanRuntimeReadScope *r_scope);
+void BKE_ocean_runtime_read_end(struct OceanRuntimeReadScope *scope);
+bool BKE_ocean_eval_uv_in_scope(const struct OceanRuntimeReadScope *scope,
+                                struct OceanResult *ocr,
+                                float u,
+                                float v);
 /**
  * Use catmullrom interpolation rather than linear.
  */
