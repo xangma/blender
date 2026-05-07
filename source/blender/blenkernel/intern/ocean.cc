@@ -429,6 +429,94 @@ MINLINE size_t ocean_split_level_index(const OceanSplitLevel &level, const int x
   return size_t(x) * size_t(level.size_y) + size_t(y);
 }
 
+static void ocean_split_level_update_normals(OceanSplitLevel &level,
+                                             const float inv_dx,
+                                             const float inv_dz)
+{
+  const auto update_x_range = [&](const blender::IndexRange x_range) {
+    for (const int64_t x_i : x_range) {
+      const int x = int(x_i);
+      const int xm = ocean_split_wrap_index(x - 1, level.size_x);
+      const int xp = ocean_split_wrap_index(x + 1, level.size_x);
+      for (int y = 0; y < level.size_y; y++) {
+        const int ym = ocean_split_wrap_index(y - 1, level.size_y);
+        const int yp = ocean_split_wrap_index(y + 1, level.size_y);
+
+        const float ddx_dx = (level.disp_x[ocean_split_level_index(level, xp, y)] -
+                              level.disp_x[ocean_split_level_index(level, xm, y)]) *
+                             inv_dx;
+        const float ddx_dz = (level.disp_x[ocean_split_level_index(level, x, yp)] -
+                              level.disp_x[ocean_split_level_index(level, x, ym)]) *
+                             inv_dz;
+        const float ddy_dx = (level.disp_y[ocean_split_level_index(level, xp, y)] -
+                              level.disp_y[ocean_split_level_index(level, xm, y)]) *
+                             inv_dx;
+        const float ddy_dz = (level.disp_y[ocean_split_level_index(level, x, yp)] -
+                              level.disp_y[ocean_split_level_index(level, x, ym)]) *
+                             inv_dz;
+        const float ddz_dx = (level.disp_z[ocean_split_level_index(level, xp, y)] -
+                              level.disp_z[ocean_split_level_index(level, xm, y)]) *
+                             inv_dx;
+        const float ddz_dz = (level.disp_z[ocean_split_level_index(level, x, yp)] -
+                              level.disp_z[ocean_split_level_index(level, x, ym)]) *
+                             inv_dz;
+
+        float tangent_x[3] = {1.0f + ddx_dx, ddy_dx, ddz_dx};
+        float tangent_z[3] = {ddx_dz, ddy_dz, 1.0f + ddz_dz};
+        float normal[3];
+        cross_v3_v3v3(normal, tangent_z, tangent_x);
+        if (normalize_v3(normal) == 0.0f) {
+          normal[0] = 0.0f;
+          normal[1] = 1.0f;
+          normal[2] = 0.0f;
+        }
+
+        const size_t index = ocean_split_level_index(level, x, y);
+        level.normal_x[index] = normal[0];
+        level.normal_y[index] = normal[1];
+        level.normal_z[index] = normal[2];
+      }
+    }
+  };
+
+  const int64_t sample_count = int64_t(level.size_x) * int64_t(level.size_y);
+  if (sample_count >= 32768) {
+    blender::threading::parallel_for(blender::IndexRange(level.size_x), 1, update_x_range);
+  }
+  else {
+    update_x_range(blender::IndexRange(level.size_x));
+  }
+}
+
+static void ocean_split_level_update_moments_from_normals(OceanSplitLevel &level,
+                                                          const float inv_sample_count)
+{
+  for (int x = 0; x < level.size_x; x++) {
+    for (int y = 0; y < level.size_y; y++) {
+      const size_t index = ocean_split_level_index(level, x, y);
+      const float disp_x = level.disp_x[index];
+      const float disp_y = level.disp_y[index];
+      const float disp_z = level.disp_z[index];
+
+      level.cumulative_disp_variance[0] += disp_x * disp_x * inv_sample_count;
+      level.cumulative_disp_variance[1] += disp_y * disp_y * inv_sample_count;
+      level.cumulative_disp_variance[2] += disp_z * disp_z * inv_sample_count;
+
+      const float normal[3] = {
+          level.normal_x[index], level.normal_y[index], level.normal_z[index]};
+
+      const float safe_normal_y = (fabsf(normal[1]) > 1.0e-6f) ? normal[1] :
+                                                              ((normal[1] < 0.0f) ? -1.0e-6f :
+                                                                                     1.0e-6f);
+      const float slope_x = -normal[0] / safe_normal_y;
+      const float slope_z = -normal[2] / safe_normal_y;
+      level.cumulative_slope_moment[0] += slope_x * slope_x * inv_sample_count;
+      level.cumulative_slope_moment[1] += slope_x * slope_z * inv_sample_count;
+      level.cumulative_slope_moment[2] += slope_z * slope_z * inv_sample_count;
+    }
+  }
+}
+
 static void ocean_split_level_update_normals_and_moments(const Ocean *o, OceanSplitLevel &level)
 {
   zero_v3(level.cumulative_disp_variance);
@@ -444,65 +532,10 @@ static void ocean_split_level_update_normals_and_moments(const Ocean *o, OceanSp
   const float inv_dz = (cell_z > 1.0e-12f) ? (0.5f / cell_z) : 0.0f;
   const float inv_sample_count = 1.0f / float(size_t(level.size_x) * size_t(level.size_y));
 
-  for (int x = 0; x < level.size_x; x++) {
-    const int xm = ocean_split_wrap_index(x - 1, level.size_x);
-    const int xp = ocean_split_wrap_index(x + 1, level.size_x);
-    for (int y = 0; y < level.size_y; y++) {
-      const int ym = ocean_split_wrap_index(y - 1, level.size_y);
-      const int yp = ocean_split_wrap_index(y + 1, level.size_y);
-
-      const size_t index = ocean_split_level_index(level, x, y);
-      const float disp_x = level.disp_x[index];
-      const float disp_y = level.disp_y[index];
-      const float disp_z = level.disp_z[index];
-
-      level.cumulative_disp_variance[0] += disp_x * disp_x * inv_sample_count;
-      level.cumulative_disp_variance[1] += disp_y * disp_y * inv_sample_count;
-      level.cumulative_disp_variance[2] += disp_z * disp_z * inv_sample_count;
-
-      const float ddx_dx = (level.disp_x[ocean_split_level_index(level, xp, y)] -
-                            level.disp_x[ocean_split_level_index(level, xm, y)]) *
-                           inv_dx;
-      const float ddx_dz = (level.disp_x[ocean_split_level_index(level, x, yp)] -
-                            level.disp_x[ocean_split_level_index(level, x, ym)]) *
-                           inv_dz;
-      const float ddy_dx = (level.disp_y[ocean_split_level_index(level, xp, y)] -
-                            level.disp_y[ocean_split_level_index(level, xm, y)]) *
-                           inv_dx;
-      const float ddy_dz = (level.disp_y[ocean_split_level_index(level, x, yp)] -
-                            level.disp_y[ocean_split_level_index(level, x, ym)]) *
-                           inv_dz;
-      const float ddz_dx = (level.disp_z[ocean_split_level_index(level, xp, y)] -
-                            level.disp_z[ocean_split_level_index(level, xm, y)]) *
-                           inv_dx;
-      const float ddz_dz = (level.disp_z[ocean_split_level_index(level, x, yp)] -
-                            level.disp_z[ocean_split_level_index(level, x, ym)]) *
-                           inv_dz;
-
-      float tangent_x[3] = {1.0f + ddx_dx, ddy_dx, ddz_dx};
-      float tangent_z[3] = {ddx_dz, ddy_dz, 1.0f + ddz_dz};
-      float normal[3];
-      cross_v3_v3v3(normal, tangent_z, tangent_x);
-      if (normalize_v3(normal) == 0.0f) {
-        normal[0] = 0.0f;
-        normal[1] = 1.0f;
-        normal[2] = 0.0f;
-      }
-
-      level.normal_x[index] = normal[0];
-      level.normal_y[index] = normal[1];
-      level.normal_z[index] = normal[2];
-
-      const float safe_normal_y = (fabsf(normal[1]) > 1.0e-6f) ? normal[1] :
-                                                              ((normal[1] < 0.0f) ? -1.0e-6f :
-                                                                                     1.0e-6f);
-      const float slope_x = -normal[0] / safe_normal_y;
-      const float slope_z = -normal[2] / safe_normal_y;
-      level.cumulative_slope_moment[0] += slope_x * slope_x * inv_sample_count;
-      level.cumulative_slope_moment[1] += slope_x * slope_z * inv_sample_count;
-      level.cumulative_slope_moment[2] += slope_z * slope_z * inv_sample_count;
-    }
-  }
+  /* Keep moment accumulation in the original x/y order so leaf decisions do not depend on
+   * thread scheduling. The derivative and normal calculation is independent per sample. */
+  ocean_split_level_update_normals(level, inv_dx, inv_dz);
+  ocean_split_level_update_moments_from_normals(level, inv_sample_count);
 }
 
 static void ocean_split_copy_base_level(Ocean *o)
