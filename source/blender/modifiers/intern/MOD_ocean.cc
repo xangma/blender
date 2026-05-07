@@ -3427,6 +3427,12 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   return settings;
 }
 
+struct OceanCameraLODTopologyCorner {
+  int dense_x;
+  int dense_y;
+  float morph_factor;
+};
+
 static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
                                                 OceanModifierData * /*omd*/,
                                                 Mesh *mesh_orig,
@@ -3453,15 +3459,9 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
                                 float(std::max(dense_cells_per_side, 1));
 
   Vector<float3> positions;
-  Vector<int> face_offsets;
-  Vector<int> corner_verts;
   Vector<int> point_levels;
   Vector<float> point_morph_factors;
   Vector<float> point_radius;
-  Vector<float> face_leaf_ids;
-  Vector<float> face_leaf_levels;
-  Vector<float> face_leaf_split_levels;
-  Vector<float> face_cell_sizes;
   const int64_t expected_leaf_count = lod_settings.leaves.size();
   const int64_t expected_vert_count = std::min<int64_t>(
       lod_settings.dense_vert_budget,
@@ -3470,17 +3470,14 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   point_levels.reserve(expected_vert_count);
   point_morph_factors.reserve(expected_vert_count);
   point_radius.reserve(expected_vert_count);
-  face_offsets.reserve(lod_settings.leaves.size());
-  corner_verts.reserve(lod_settings.leaves.size() * 4);
-  face_leaf_ids.reserve(lod_settings.leaves.size());
-  face_leaf_levels.reserve(lod_settings.leaves.size());
-  face_leaf_split_levels.reserve(lod_settings.leaves.size());
-  face_cell_sizes.reserve(lod_settings.leaves.size());
   Array<int> level_face_counts(quadtree_levels, 0);
   Array<int> dense_vertex_map(size_t(dense_cells_per_side + 1) * size_t(dense_cells_per_side + 1));
   dense_vertex_map.as_mutable_span().fill(-1);
   Array<int> leaf_owner_cell_map(size_t(dense_cells_per_side) * size_t(dense_cells_per_side));
   leaf_owner_cell_map.as_mutable_span().fill(-1);
+  Array<int8_t> leaf_corner_counts(lod_settings.leaves.size(), 0);
+  Array<int> leaf_face_indices(lod_settings.leaves.size(), -1);
+  Array<int> leaf_corner_offsets(lod_settings.leaves.size(), 0);
 
   auto dense_coord = [&](const int dense_x, const int dense_y) {
     return float2(-domain_half_extent + (float(dense_x) * dense_cell_size),
@@ -3558,20 +3555,6 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
 
     const float morph_width = std::max(2.0f * leaf.cell_size, 1.0e-6f);
     return clamp_f(distance / morph_width, 0.0f, 1.0f);
-  };
-
-  auto add_face = [&](const Span<int> verts,
-                      const int leaf_id,
-                      const int local_level_index,
-                      const int split_level_index,
-                      const float cell_size) {
-    BLI_assert(!verts.is_empty());
-    face_offsets.append(corner_verts.size());
-    corner_verts.extend(verts);
-    face_leaf_ids.append(float(leaf_id));
-    face_leaf_levels.append(float(local_level_index));
-    face_leaf_split_levels.append(float(split_level_index));
-    face_cell_sizes.append(cell_size);
   };
 
   const double owner_map_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
@@ -3667,86 +3650,145 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   };
 
   const double topology_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+  blender::threading::parallel_for(
+      lod_settings.leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
+          if (leaf.max_x <= leaf.min_x || leaf.max_y <= leaf.min_y) {
+            continue;
+          }
+
+          const Vector<int, 8> south_x = edge_split_positions(leaf_index,
+                                                              OceanCameraLODEdge::South);
+          const Vector<int, 8> east_y = edge_split_positions(leaf_index,
+                                                             OceanCameraLODEdge::East);
+          const Vector<int, 8> north_x = edge_split_positions(leaf_index,
+                                                              OceanCameraLODEdge::North);
+          const Vector<int, 8> west_y = edge_split_positions(leaf_index,
+                                                             OceanCameraLODEdge::West);
+          const int corner_count = int(south_x.size()) + std::max(int(east_y.size()) - 1, 0) +
+                                   std::max(int(north_x.size()) - 1, 0) +
+                                   std::max(int(west_y.size()) - 2, 0);
+          BLI_assert(corner_count <= 8);
+          leaf_corner_counts[leaf_index] = int8_t(corner_count);
+        }
+      });
+
+  int faces_num = 0;
+  int corners_num = 0;
   for (const int leaf_index : lod_settings.leaves.index_range()) {
-    const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
-    const int split_level_index = leaf.split_level_index;
-    const int dense_x0 = leaf.min_x;
-    const int dense_x1 = leaf.max_x;
-    const int dense_y0 = leaf.min_y;
-    const int dense_y1 = leaf.max_y;
-    if (dense_x1 <= dense_x0 || dense_y1 <= dense_y0) {
+    const int corner_count = leaf_corner_counts[leaf_index];
+    if (corner_count == 0) {
       continue;
     }
-    const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(lod_settings, leaf);
-    const float2 leaf_region_max = ocean_camera_lod_leaf_region_max(lod_settings, leaf);
-    const Vector<int, 8> south_x = edge_split_positions(leaf_index, OceanCameraLODEdge::South);
-    const Vector<int, 8> east_y = edge_split_positions(leaf_index, OceanCameraLODEdge::East);
-    const Vector<int, 8> north_x = edge_split_positions(leaf_index, OceanCameraLODEdge::North);
-    const Vector<int, 8> west_y = edge_split_positions(leaf_index, OceanCameraLODEdge::West);
-    const bool south_finer = south_x.size() > 2;
-    const bool east_finer = east_y.size() > 2;
-    const bool north_finer = north_x.size() > 2;
-    const bool west_finer = west_y.size() > 2;
+    leaf_face_indices[leaf_index] = faces_num++;
+    leaf_corner_offsets[leaf_index] = corners_num;
+    corners_num += corner_count;
+    level_face_counts[lod_settings.leaves[leaf_index].local_level_index]++;
+  }
 
-    Vector<int, 8> face_verts;
-    auto append_face_vertex = [&](const int dense_x, const int dense_y, const float morph_factor) {
-      face_verts.append(ensure_vertex(dense_x, dense_y, split_level_index, morph_factor));
-    };
+  Array<OceanCameraLODTopologyCorner> topology_corners(corners_num);
+  blender::threading::parallel_for(
+      lod_settings.leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const int corner_count = leaf_corner_counts[leaf_index];
+          if (corner_count == 0) {
+            continue;
+          }
 
-    for (const int x_coord : south_x) {
-      const float2 coord = dense_coord(x_coord, dense_y0);
-      const float morph_factor = (x_coord == dense_x0 || x_coord == dense_x1) ?
-                                     morph_factor_for_coord(leaf,
-                                                            leaf_region_min,
-                                                            leaf_region_max,
-                                                            south_finer,
-                                                            east_finer,
-                                                            north_finer,
-                                                            west_finer,
-                                                            coord) :
-                                     0.0f;
-      append_face_vertex(x_coord, dense_y0, morph_factor);
-    }
-    for (int edge_index = 1; edge_index < east_y.size(); edge_index++) {
-      const int y_coord = east_y[edge_index];
-      const float2 coord = dense_coord(dense_x1, y_coord);
-      const float morph_factor = (y_coord == dense_y1) ?
-                                     morph_factor_for_coord(leaf,
-                                                            leaf_region_min,
-                                                            leaf_region_max,
-                                                            south_finer,
-                                                            east_finer,
-                                                            north_finer,
-                                                            west_finer,
-                                                            coord) :
-                                     0.0f;
-      append_face_vertex(dense_x1, y_coord, morph_factor);
-    }
-    for (int edge_index = north_x.size() - 2; edge_index >= 0; edge_index--) {
-      const int x_coord = north_x[edge_index];
-      const float2 coord = dense_coord(x_coord, dense_y1);
-      const float morph_factor = (x_coord == dense_x0) ?
-                                     morph_factor_for_coord(leaf,
-                                                            leaf_region_min,
-                                                            leaf_region_max,
-                                                            south_finer,
-                                                            east_finer,
-                                                            north_finer,
-                                                            west_finer,
-                                                            coord) :
-                                     0.0f;
-      append_face_vertex(x_coord, dense_y1, morph_factor);
-    }
-    for (int edge_index = west_y.size() - 2; edge_index > 0; edge_index--) {
-      append_face_vertex(dense_x0, west_y[edge_index], 0.0f);
-    }
+          const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
+          const int dense_x0 = leaf.min_x;
+          const int dense_x1 = leaf.max_x;
+          const int dense_y0 = leaf.min_y;
+          const int dense_y1 = leaf.max_y;
+          const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(lod_settings, leaf);
+          const float2 leaf_region_max = ocean_camera_lod_leaf_region_max(lod_settings, leaf);
+          const Vector<int, 8> south_x = edge_split_positions(leaf_index,
+                                                              OceanCameraLODEdge::South);
+          const Vector<int, 8> east_y = edge_split_positions(leaf_index,
+                                                             OceanCameraLODEdge::East);
+          const Vector<int, 8> north_x = edge_split_positions(leaf_index,
+                                                              OceanCameraLODEdge::North);
+          const Vector<int, 8> west_y = edge_split_positions(leaf_index,
+                                                             OceanCameraLODEdge::West);
+          const bool south_finer = south_x.size() > 2;
+          const bool east_finer = east_y.size() > 2;
+          const bool north_finer = north_x.size() > 2;
+          const bool west_finer = west_y.size() > 2;
 
-    add_face(face_verts.as_span(),
-             leaf_index,
-             leaf.local_level_index,
-             leaf.split_level_index,
-             leaf.cell_size);
-    level_face_counts[leaf.local_level_index]++;
+          int corner_offset = leaf_corner_offsets[leaf_index];
+          auto append_topology_corner = [&](const int dense_x,
+                                            const int dense_y,
+                                            const float morph_factor) {
+            topology_corners[corner_offset++] = {dense_x, dense_y, morph_factor};
+          };
+
+          for (const int x_coord : south_x) {
+            const float2 coord = dense_coord(x_coord, dense_y0);
+            const float morph_factor = (x_coord == dense_x0 || x_coord == dense_x1) ?
+                                           morph_factor_for_coord(leaf,
+                                                                  leaf_region_min,
+                                                                  leaf_region_max,
+                                                                  south_finer,
+                                                                  east_finer,
+                                                                  north_finer,
+                                                                  west_finer,
+                                                                  coord) :
+                                           0.0f;
+            append_topology_corner(x_coord, dense_y0, morph_factor);
+          }
+          for (int edge_index = 1; edge_index < east_y.size(); edge_index++) {
+            const int y_coord = east_y[edge_index];
+            const float2 coord = dense_coord(dense_x1, y_coord);
+            const float morph_factor = (y_coord == dense_y1) ?
+                                           morph_factor_for_coord(leaf,
+                                                                  leaf_region_min,
+                                                                  leaf_region_max,
+                                                                  south_finer,
+                                                                  east_finer,
+                                                                  north_finer,
+                                                                  west_finer,
+                                                                  coord) :
+                                           0.0f;
+            append_topology_corner(dense_x1, y_coord, morph_factor);
+          }
+          for (int edge_index = north_x.size() - 2; edge_index >= 0; edge_index--) {
+            const int x_coord = north_x[edge_index];
+            const float2 coord = dense_coord(x_coord, dense_y1);
+            const float morph_factor = (x_coord == dense_x0) ?
+                                           morph_factor_for_coord(leaf,
+                                                                  leaf_region_min,
+                                                                  leaf_region_max,
+                                                                  south_finer,
+                                                                  east_finer,
+                                                                  north_finer,
+                                                                  west_finer,
+                                                                  coord) :
+                                           0.0f;
+            append_topology_corner(x_coord, dense_y1, morph_factor);
+          }
+          for (int edge_index = west_y.size() - 2; edge_index > 0; edge_index--) {
+            append_topology_corner(dense_x0, west_y[edge_index], 0.0f);
+          }
+
+          BLI_assert(corner_offset == leaf_corner_offsets[leaf_index] + corner_count);
+        }
+      });
+
+  for (const int leaf_index : lod_settings.leaves.index_range()) {
+    const int corner_count = leaf_corner_counts[leaf_index];
+    if (corner_count == 0) {
+      continue;
+    }
+    const int split_level_index = lod_settings.leaves[leaf_index].split_level_index;
+    const int corner_offset = leaf_corner_offsets[leaf_index];
+    for (const int corner : blender::IndexRange(corner_count)) {
+      const OceanCameraLODTopologyCorner &topology_corner = topology_corners[corner_offset + corner];
+      ensure_vertex(topology_corner.dense_x,
+                    topology_corner.dense_y,
+                    split_level_index,
+                    topology_corner.morph_factor);
+    }
   }
   const double topology_s = profile_enabled ? (BLI_time_now_seconds() - topology_start) : 0.0;
 
@@ -3773,7 +3815,7 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
            lod_settings.dense_vert_budget,
            lod_settings.dense_vert_budget,
            int(positions.size()),
-           int(face_offsets.size()),
+           faces_num,
            (int(positions.size()) <= lod_settings.dense_vert_budget) ? "ok" : "violated");
     for (const int level_index : owner_vertex_counts.index_range()) {
       printf("[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod level=%d emitted_owner_verts=%d "
@@ -3786,36 +3828,84 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   }
 
   const double finalize_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-  Mesh *result = BKE_mesh_new_nomain(
-      positions.size(), 0, face_offsets.size(), corner_verts.size());
+  Mesh *result = BKE_mesh_new_nomain(positions.size(), 0, faces_num, corners_num);
   BKE_mesh_copy_parameters_for_eval(result, mesh_orig);
   result->vert_positions_for_write().copy_from(positions.as_span());
   auto result_face_offsets = result->face_offsets_for_write();
-  result_face_offsets.drop_back(1).copy_from(face_offsets.as_span());
-  result_face_offsets.last() = corner_verts.size();
-  result->corner_verts_for_write().copy_from(corner_verts.as_span());
+  auto result_corner_verts = result->corner_verts_for_write();
+  blender::threading::parallel_for(
+      lod_settings.leaves.index_range(), 512, [&](const blender::IndexRange range) {
+        for (const int leaf_index : range) {
+          const int face_index = leaf_face_indices[leaf_index];
+          if (face_index < 0) {
+            continue;
+          }
+
+          const int corner_count = leaf_corner_counts[leaf_index];
+          const int corner_offset = leaf_corner_offsets[leaf_index];
+          result_face_offsets[face_index] = corner_offset;
+          for (const int corner : blender::IndexRange(corner_count)) {
+            const OceanCameraLODTopologyCorner &topology_corner =
+                topology_corners[corner_offset + corner];
+            result_corner_verts[corner_offset + corner] =
+                dense_vertex_map[dense_index(topology_corner.dense_x, topology_corner.dense_y)];
+          }
+        }
+      });
+  result_face_offsets.last() = corners_num;
   blender::bke::mesh_calc_edges(*result, false, false);
 
-  if (!face_offsets.is_empty()) {
-    BLI_assert(face_leaf_ids.size() == face_offsets.size());
-    BLI_assert(face_leaf_levels.size() == face_offsets.size());
-    BLI_assert(face_leaf_split_levels.size() == face_offsets.size());
-    BLI_assert(face_cell_sizes.size() == face_offsets.size());
-
+  if (faces_num > 0) {
     blender::bke::MutableAttributeAccessor attributes = result->attributes_for_write();
-    auto write_face_attribute = [&](const char *name, const Span<float> values) {
-      blender::bke::SpanAttributeWriter<float> attr =
-          attributes.lookup_or_add_for_write_only_span<float>(name, blender::bke::AttrDomain::Face);
-      if (!attr) {
-        return;
-      }
-      attr.span.copy_from(values);
-      attr.finish();
-    };
-    write_face_attribute(OCEAN_ATTR_CAMERA_LOD_LEAF_ID, face_leaf_ids.as_span());
-    write_face_attribute(OCEAN_ATTR_CAMERA_LOD_LEAF_LEVEL, face_leaf_levels.as_span());
-    write_face_attribute(OCEAN_ATTR_CAMERA_LOD_LEAF_SPLIT_LEVEL, face_leaf_split_levels.as_span());
-    write_face_attribute(OCEAN_ATTR_CAMERA_LOD_CELL_SIZE, face_cell_sizes.as_span());
+    blender::bke::SpanAttributeWriter<float> face_leaf_ids =
+        attributes.lookup_or_add_for_write_only_span<float>(OCEAN_ATTR_CAMERA_LOD_LEAF_ID,
+                                                            blender::bke::AttrDomain::Face);
+    blender::bke::SpanAttributeWriter<float> face_leaf_levels =
+        attributes.lookup_or_add_for_write_only_span<float>(OCEAN_ATTR_CAMERA_LOD_LEAF_LEVEL,
+                                                            blender::bke::AttrDomain::Face);
+    blender::bke::SpanAttributeWriter<float> face_leaf_split_levels =
+        attributes.lookup_or_add_for_write_only_span<float>(
+            OCEAN_ATTR_CAMERA_LOD_LEAF_SPLIT_LEVEL, blender::bke::AttrDomain::Face);
+    blender::bke::SpanAttributeWriter<float> face_cell_sizes =
+        attributes.lookup_or_add_for_write_only_span<float>(OCEAN_ATTR_CAMERA_LOD_CELL_SIZE,
+                                                            blender::bke::AttrDomain::Face);
+
+    blender::threading::parallel_for(
+        lod_settings.leaves.index_range(), 512, [&](const blender::IndexRange range) {
+          for (const int leaf_index : range) {
+            const int face_index = leaf_face_indices[leaf_index];
+            if (face_index < 0) {
+              continue;
+            }
+
+            const OceanCameraLODLeaf &leaf = lod_settings.leaves[leaf_index];
+            if (face_leaf_ids) {
+              face_leaf_ids.span[face_index] = float(leaf_index);
+            }
+            if (face_leaf_levels) {
+              face_leaf_levels.span[face_index] = float(leaf.local_level_index);
+            }
+            if (face_leaf_split_levels) {
+              face_leaf_split_levels.span[face_index] = float(leaf.split_level_index);
+            }
+            if (face_cell_sizes) {
+              face_cell_sizes.span[face_index] = leaf.cell_size;
+            }
+          }
+        });
+
+    if (face_leaf_ids) {
+      face_leaf_ids.finish();
+    }
+    if (face_leaf_levels) {
+      face_leaf_levels.finish();
+    }
+    if (face_leaf_split_levels) {
+      face_leaf_split_levels.finish();
+    }
+    if (face_cell_sizes) {
+      face_cell_sizes.finish();
+    }
 
     ocean_camera_lod_set_mesh_string_property(
         *result, OCEAN_PROP_CAMERA_LOD_CONTRACT, OCEAN_CAMERA_LOD_CONTRACT_ADAPTIVE_LEAF);
@@ -3844,7 +3934,7 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
         BLI_time_now_seconds() - finalize_start,
         quadtree_levels,
         int(positions.size()),
-        int(face_offsets.size()),
+        faces_num,
         lod_settings.dense_vert_budget);
   }
 

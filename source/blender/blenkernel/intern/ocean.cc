@@ -24,6 +24,7 @@
 #include "BLI_path_utils.hh"
 #include "BLI_rand.h"
 #include "BLI_task.h"
+#include "BLI_task.hh"
 #include "BLI_utildefines.h"
 
 #include "BKE_image.hh"
@@ -510,11 +511,15 @@ static void ocean_split_copy_base_level(Ocean *o)
   base_level.wavelength = ocean_split_min_wavelength(o);
   const size_t size = size_t(o->_M) * size_t(o->_N);
 
-  for (size_t index = 0; index < size; index++) {
-    base_level.disp_y[index] = o->_do_disp_y ? float(o->_disp_y[index]) : 0.0f;
-    base_level.disp_x[index] = o->_do_chop ? float(o->_disp_x[index]) : 0.0f;
-    base_level.disp_z[index] = o->_do_chop ? float(o->_disp_z[index]) : 0.0f;
-  }
+  blender::threading::parallel_for(
+      blender::IndexRange(size), 4096, [&](const blender::IndexRange range) {
+        for (const int64_t index_i : range) {
+          const size_t index = size_t(index_i);
+          base_level.disp_y[index] = o->_do_disp_y ? float(o->_disp_y[index]) : 0.0f;
+          base_level.disp_x[index] = o->_do_chop ? float(o->_disp_x[index]) : 0.0f;
+          base_level.disp_z[index] = o->_do_chop ? float(o->_disp_z[index]) : 0.0f;
+        }
+      });
   ocean_split_level_update_normals_and_moments(o, base_level);
 }
 
@@ -538,48 +543,57 @@ static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, cons
   ocean_split_copy_base_level(o);
 
   const size_t size = size_t(o->_M) * size_t(o->_N);
-  for (int level_index = 1; level_index < o->_split_levels_num; level_index++) {
-    OceanSplitLevel &level = o->_split_levels[level_index];
-    BLI_assert(level.fft_plan != nullptr);
-    level.wavelength = ocean_split_level_wavelength(o, level_index);
+  blender::threading::parallel_for(
+      blender::IndexRange(1, std::max(o->_split_levels_num - 1, 0)),
+      1,
+      [&](const blender::IndexRange range) {
+        for (const int level_index : range) {
+          OceanSplitLevel &level = o->_split_levels[level_index];
+          BLI_assert(level.fft_plan != nullptr);
+          level.wavelength = ocean_split_level_wavelength(o, level_index);
 
-    ocean_split_prepare_spectrum_reduced(
-        o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Y, scale, chop_amount);
-    fftw_execute(level.fft_plan);
-    ocean_split_copy_fft_output(
-        level.disp_y, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+          ocean_split_prepare_spectrum_reduced(
+              o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Y, scale, chop_amount);
+          fftw_execute(level.fft_plan);
+          ocean_split_copy_fft_output(
+              level.disp_y, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
 
-    if (o->_do_chop) {
-      ocean_split_prepare_spectrum_reduced(
-          o, level, level_index, OCEAN_SPLIT_FIELD_DISP_X, scale, chop_amount);
-      fftw_execute(level.fft_plan);
-      ocean_split_copy_fft_output(
-          level.disp_x, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+          if (o->_do_chop) {
+            ocean_split_prepare_spectrum_reduced(
+                o, level, level_index, OCEAN_SPLIT_FIELD_DISP_X, scale, chop_amount);
+            fftw_execute(level.fft_plan);
+            ocean_split_copy_fft_output(
+                level.disp_x, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
 
-      ocean_split_prepare_spectrum_reduced(
-          o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Z, scale, chop_amount);
-      fftw_execute(level.fft_plan);
-      ocean_split_copy_fft_output(
-          level.disp_z, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
-    }
-    else {
-      memset(level.disp_x, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
-      memset(level.disp_z, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
-    }
+            ocean_split_prepare_spectrum_reduced(
+                o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Z, scale, chop_amount);
+            fftw_execute(level.fft_plan);
+            ocean_split_copy_fft_output(
+                level.disp_z, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+          }
+          else {
+            memset(level.disp_x, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
+            memset(level.disp_z, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
+          }
 
-    ocean_split_level_update_normals_and_moments(o, level);
-  }
+          ocean_split_level_update_normals_and_moments(o, level);
+        }
+      });
 
   const OceanSplitLevel &base_level = o->_split_levels[0];
-  for (size_t index = 0; index < size; index++) {
-    if (o->_do_disp_y) {
-      o->_disp_y[index] = double(base_level.disp_y[index]);
-    }
-    if (o->_do_chop) {
-      o->_disp_x[index] = double(base_level.disp_x[index]);
-      o->_disp_z[index] = double(base_level.disp_z[index]);
-    }
-  }
+  blender::threading::parallel_for(
+      blender::IndexRange(size), 4096, [&](const blender::IndexRange range) {
+        for (const int64_t index_i : range) {
+          const size_t index = size_t(index_i);
+          if (o->_do_disp_y) {
+            o->_disp_y[index] = double(base_level.disp_y[index]);
+          }
+          if (o->_do_chop) {
+            o->_disp_x[index] = double(base_level.disp_x[index]);
+            o->_disp_z[index] = double(base_level.disp_z[index]);
+          }
+        }
+      });
 
   o->_split_runtime_revision++;
 }
