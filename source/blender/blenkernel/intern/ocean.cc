@@ -181,6 +181,725 @@ static void exp_complex(fftw_complex res, fftw_complex cmpl)
   res[1] = sinf(cmpl[1]) * r;
 }
 
+static void ocean_split_level_free(OceanSplitLevel *level)
+{
+  if (!level) {
+    return;
+  }
+
+  if (level->fft_plan != nullptr) {
+    BLI_thread_lock(LOCK_FFTW);
+    fftw_destroy_plan(level->fft_plan);
+    BLI_thread_unlock(LOCK_FFTW);
+    level->fft_plan = nullptr;
+  }
+
+  MEM_SAFE_FREE(level->fft_in);
+  MEM_SAFE_FREE(level->fft_out);
+  MEM_SAFE_FREE(level->disp_x);
+  MEM_SAFE_FREE(level->disp_y);
+  MEM_SAFE_FREE(level->disp_z);
+  MEM_SAFE_FREE(level->normal_x);
+  MEM_SAFE_FREE(level->normal_y);
+  MEM_SAFE_FREE(level->normal_z);
+  level->size_x = 0;
+  level->size_y = 0;
+  level->wavelength = 0.0f;
+  zero_v3(level->cumulative_disp_variance);
+  zero_v3(level->cumulative_slope_moment);
+}
+
+static void ocean_free_split_data(Ocean *o)
+{
+  if (!o || !o->_split_levels) {
+    return;
+  }
+
+  for (int level_index = 0; level_index < o->_split_levels_num; level_index++) {
+    ocean_split_level_free(&o->_split_levels[level_index]);
+  }
+
+  MEM_SAFE_FREE(o->_split_levels);
+  o->_split_levels_num = 0;
+}
+
+static bool ocean_split_level_alloc(OceanSplitLevel *level,
+                                    const int size_x,
+                                    const int size_y,
+                                    const bool needs_fft_plan)
+{
+  BLI_assert(level != nullptr);
+
+  level->size_x = size_x;
+  level->size_y = size_y;
+  level->wavelength = 0.0f;
+  level->fft_in = nullptr;
+  level->fft_out = nullptr;
+  level->fft_plan = nullptr;
+  zero_v3(level->cumulative_disp_variance);
+  zero_v3(level->cumulative_slope_moment);
+
+  const size_t size = size_t(size_x) * size_t(size_y);
+  level->disp_x = MEM_calloc_arrayN<float>(size, "ocean_split_disp_x");
+  level->disp_y = MEM_calloc_arrayN<float>(size, "ocean_split_disp_y");
+  level->disp_z = MEM_calloc_arrayN<float>(size, "ocean_split_disp_z");
+  level->normal_x = MEM_calloc_arrayN<float>(size, "ocean_split_normal_x");
+  level->normal_y = MEM_calloc_arrayN<float>(size, "ocean_split_normal_y");
+  level->normal_z = MEM_calloc_arrayN<float>(size, "ocean_split_normal_z");
+
+  if (!(level->disp_x && level->disp_y && level->disp_z && level->normal_x && level->normal_y &&
+        level->normal_z))
+  {
+    ocean_split_level_free(level);
+    return false;
+  }
+
+  if (needs_fft_plan) {
+    level->fft_in = MEM_malloc_arrayN<fftw_complex>(
+        size_t(size_x) * (1 + size_t(size_y) / 2), "ocean_split_fft_in");
+    level->fft_out = MEM_malloc_arrayN<double>(size, "ocean_split_fft_out");
+    if (!(level->fft_in && level->fft_out)) {
+      ocean_split_level_free(level);
+      return false;
+    }
+
+    BLI_thread_lock(LOCK_FFTW);
+    level->fft_plan = fftw_plan_dft_c2r_2d(
+        size_x, size_y, level->fft_in, level->fft_out, FFTW_ESTIMATE);
+    BLI_thread_unlock(LOCK_FFTW);
+    if (level->fft_plan == nullptr) {
+      ocean_split_level_free(level);
+      return false;
+    }
+  }
+
+  return true;
+}
+
+static int ocean_split_level_count(const int size_x, const int size_y)
+{
+  int levels = 1;
+  int x = size_x;
+  int y = size_y;
+  while (x > 1 || y > 1) {
+    x = std::max(x / 2, 1);
+    y = std::max(y / 2, 1);
+    levels++;
+  }
+  return levels;
+}
+
+static void ocean_split_level_size(const Ocean *o,
+                                   const int level_index,
+                                   int *r_size_x,
+                                   int *r_size_y)
+{
+  BLI_assert(o != nullptr);
+  BLI_assert(r_size_x != nullptr);
+  BLI_assert(r_size_y != nullptr);
+
+  *r_size_x = std::max(o->_M >> level_index, 1);
+  *r_size_y = std::max(o->_N >> level_index, 1);
+}
+
+static bool ocean_ensure_split_levels(Ocean *o)
+{
+  if (!o->_do_split) {
+    return false;
+  }
+
+  if (o->_split_levels) {
+    return true;
+  }
+
+  const int levels_num = ocean_split_level_count(o->_M, o->_N);
+  o->_split_levels = MEM_calloc_arrayN<OceanSplitLevel>(size_t(levels_num), "ocean_split_levels");
+  if (!o->_split_levels) {
+    return false;
+  }
+
+  for (int level_index = 0; level_index < levels_num; level_index++) {
+    int level_size_x, level_size_y;
+    ocean_split_level_size(o, level_index, &level_size_x, &level_size_y);
+    if (!ocean_split_level_alloc(
+            &o->_split_levels[level_index], level_size_x, level_size_y, level_index > 0))
+    {
+      ocean_free_split_data(o);
+      return false;
+    }
+  }
+
+  o->_split_levels_num = levels_num;
+  return true;
+}
+
+enum OceanSplitField {
+  OCEAN_SPLIT_FIELD_DISP_Y = 0,
+  OCEAN_SPLIT_FIELD_DISP_X = 1,
+  OCEAN_SPLIT_FIELD_DISP_Z = 2,
+};
+
+static float ocean_split_min_wavelength(const Ocean *o);
+static float ocean_split_level_wavelength(const Ocean *o, const int level_index);
+
+static float ocean_split_mask_weight(const Ocean *o, const int level_index, const float k)
+{
+  if (level_index <= 0 || k <= 1.0e-12f) {
+    return 1.0f;
+  }
+
+  const float wavelength = (2.0f * float(M_PI)) / k;
+  const float min_wavelength = ocean_split_min_wavelength(o);
+  const float log_lambda = log2f(std::max(wavelength / min_wavelength, 1.0f));
+  const float edge0 = float(level_index - 1);
+  const float edge1 = float(level_index);
+  const float t = clamp_f((log_lambda - edge0) / std::max(edge1 - edge0, 1.0e-6f), 0.0f, 1.0f);
+  return t * t * (3.0f - 2.0f * t);
+}
+
+static int ocean_split_frequency_signed_index(const int index, const int size)
+{
+  const int half_size = size / 2;
+  return (index <= half_size) ? index : (index - size);
+}
+
+static int ocean_split_frequency_wrapped_index(const int signed_index, const int size)
+{
+  return (signed_index >= 0) ? signed_index : (size + signed_index);
+}
+
+static void ocean_split_prepare_spectrum_reduced(Ocean *o,
+                                                 OceanSplitLevel &level,
+                                                 const int level_index,
+                                                 const OceanSplitField field,
+                                                 const float scale,
+                                                 const float chop_amount)
+{
+  BLI_assert(level.fft_in != nullptr);
+
+  const int reduced_size_y_half = level.size_y / 2;
+  for (int i = 0; i < level.size_x; i++) {
+    const int signed_i = ocean_split_frequency_signed_index(i, level.size_x);
+    const int full_i = ocean_split_frequency_wrapped_index(signed_i, o->_M);
+
+    for (int j = 0; j <= reduced_size_y_half; j++) {
+      const size_t full_index = size_t(full_i) * (1 + size_t(o->_N) / 2) + size_t(j);
+      const float k = o->_k[full_index];
+      const float mask = ocean_split_mask_weight(o, level_index, k);
+      const fftw_complex &h = o->_htilda[full_index];
+
+      fftw_complex coeff;
+      switch (field) {
+        case OCEAN_SPLIT_FIELD_DISP_Y:
+          mul_complex_f(coeff, h, scale * mask);
+          break;
+        case OCEAN_SPLIT_FIELD_DISP_X: {
+          fftw_complex minus_i;
+          init_complex(minus_i, 0.0f, -1.0f);
+          mul_complex_c(coeff, minus_i, h);
+          mul_complex_f(
+              coeff, coeff, (k == 0.0f) ? 0.0f : (-scale * chop_amount * mask * o->_kx[full_i] / k));
+          break;
+        }
+        case OCEAN_SPLIT_FIELD_DISP_Z: {
+          fftw_complex minus_i;
+          init_complex(minus_i, 0.0f, -1.0f);
+          mul_complex_c(coeff, minus_i, h);
+          mul_complex_f(
+              coeff, coeff, (k == 0.0f) ? 0.0f : (-scale * chop_amount * mask * o->_kz[j] / k));
+          break;
+        }
+      }
+
+      init_complex(level.fft_in[size_t(i) * (1 + size_t(reduced_size_y_half)) + size_t(j)],
+                   real_c(coeff),
+                   image_c(coeff));
+    }
+  }
+}
+
+MINLINE int ocean_split_wrap_index(const int index, const int size)
+{
+  return (index < 0) ? (index + size) : ((index >= size) ? (index - size) : index);
+}
+
+MINLINE size_t ocean_split_level_index(const OceanSplitLevel &level, const int x, const int y)
+{
+  return size_t(x) * size_t(level.size_y) + size_t(y);
+}
+
+static void ocean_split_level_update_normals_and_moments(const Ocean *o, OceanSplitLevel &level)
+{
+  zero_v3(level.cumulative_disp_variance);
+  zero_v3(level.cumulative_slope_moment);
+
+  if (level.size_x <= 0 || level.size_y <= 0) {
+    return;
+  }
+
+  const float cell_x = (level.size_x > 0) ? (o->_Lx / float(level.size_x)) : 0.0f;
+  const float cell_z = (level.size_y > 0) ? (o->_Lz / float(level.size_y)) : 0.0f;
+  const float inv_dx = (cell_x > 1.0e-12f) ? (0.5f / cell_x) : 0.0f;
+  const float inv_dz = (cell_z > 1.0e-12f) ? (0.5f / cell_z) : 0.0f;
+  const float inv_sample_count = 1.0f / float(size_t(level.size_x) * size_t(level.size_y));
+
+  for (int x = 0; x < level.size_x; x++) {
+    const int xm = ocean_split_wrap_index(x - 1, level.size_x);
+    const int xp = ocean_split_wrap_index(x + 1, level.size_x);
+    for (int y = 0; y < level.size_y; y++) {
+      const int ym = ocean_split_wrap_index(y - 1, level.size_y);
+      const int yp = ocean_split_wrap_index(y + 1, level.size_y);
+
+      const size_t index = ocean_split_level_index(level, x, y);
+      const float disp_x = level.disp_x[index];
+      const float disp_y = level.disp_y[index];
+      const float disp_z = level.disp_z[index];
+
+      level.cumulative_disp_variance[0] += disp_x * disp_x * inv_sample_count;
+      level.cumulative_disp_variance[1] += disp_y * disp_y * inv_sample_count;
+      level.cumulative_disp_variance[2] += disp_z * disp_z * inv_sample_count;
+
+      const float ddx_dx = (level.disp_x[ocean_split_level_index(level, xp, y)] -
+                            level.disp_x[ocean_split_level_index(level, xm, y)]) *
+                           inv_dx;
+      const float ddx_dz = (level.disp_x[ocean_split_level_index(level, x, yp)] -
+                            level.disp_x[ocean_split_level_index(level, x, ym)]) *
+                           inv_dz;
+      const float ddy_dx = (level.disp_y[ocean_split_level_index(level, xp, y)] -
+                            level.disp_y[ocean_split_level_index(level, xm, y)]) *
+                           inv_dx;
+      const float ddy_dz = (level.disp_y[ocean_split_level_index(level, x, yp)] -
+                            level.disp_y[ocean_split_level_index(level, x, ym)]) *
+                           inv_dz;
+      const float ddz_dx = (level.disp_z[ocean_split_level_index(level, xp, y)] -
+                            level.disp_z[ocean_split_level_index(level, xm, y)]) *
+                           inv_dx;
+      const float ddz_dz = (level.disp_z[ocean_split_level_index(level, x, yp)] -
+                            level.disp_z[ocean_split_level_index(level, x, ym)]) *
+                           inv_dz;
+
+      float tangent_x[3] = {1.0f + ddx_dx, ddy_dx, ddz_dx};
+      float tangent_z[3] = {ddx_dz, ddy_dz, 1.0f + ddz_dz};
+      float normal[3];
+      cross_v3_v3v3(normal, tangent_z, tangent_x);
+      if (normalize_v3(normal) == 0.0f) {
+        normal[0] = 0.0f;
+        normal[1] = 1.0f;
+        normal[2] = 0.0f;
+      }
+
+      level.normal_x[index] = normal[0];
+      level.normal_y[index] = normal[1];
+      level.normal_z[index] = normal[2];
+
+      const float safe_normal_y = (fabsf(normal[1]) > 1.0e-6f) ? normal[1] :
+                                                              ((normal[1] < 0.0f) ? -1.0e-6f :
+                                                                                     1.0e-6f);
+      const float slope_x = -normal[0] / safe_normal_y;
+      const float slope_z = -normal[2] / safe_normal_y;
+      level.cumulative_slope_moment[0] += slope_x * slope_x * inv_sample_count;
+      level.cumulative_slope_moment[1] += slope_x * slope_z * inv_sample_count;
+      level.cumulative_slope_moment[2] += slope_z * slope_z * inv_sample_count;
+    }
+  }
+}
+
+static void ocean_split_copy_base_level(Ocean *o)
+{
+  OceanSplitLevel &base_level = o->_split_levels[0];
+  base_level.wavelength = ocean_split_min_wavelength(o);
+  const size_t size = size_t(o->_M) * size_t(o->_N);
+
+  for (size_t index = 0; index < size; index++) {
+    base_level.disp_y[index] = o->_do_disp_y ? float(o->_disp_y[index]) : 0.0f;
+    base_level.disp_x[index] = o->_do_chop ? float(o->_disp_x[index]) : 0.0f;
+    base_level.disp_z[index] = o->_do_chop ? float(o->_disp_z[index]) : 0.0f;
+  }
+  ocean_split_level_update_normals_and_moments(o, base_level);
+}
+
+static void ocean_split_copy_fft_output(float *dst, const double *src, const size_t size)
+{
+  for (size_t index = 0; index < size; index++) {
+    dst[index] = float(src[index]);
+  }
+}
+
+static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, const float chop_amount)
+{
+  if (!o->_do_split || !o->_do_normals) {
+    return;
+  }
+
+  if (!ocean_ensure_split_levels(o)) {
+    return;
+  }
+
+  ocean_split_copy_base_level(o);
+
+  const size_t size = size_t(o->_M) * size_t(o->_N);
+  for (int level_index = 1; level_index < o->_split_levels_num; level_index++) {
+    OceanSplitLevel &level = o->_split_levels[level_index];
+    BLI_assert(level.fft_plan != nullptr);
+    level.wavelength = ocean_split_level_wavelength(o, level_index);
+
+    ocean_split_prepare_spectrum_reduced(
+        o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Y, scale, chop_amount);
+    fftw_execute(level.fft_plan);
+    ocean_split_copy_fft_output(
+        level.disp_y, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+
+    if (o->_do_chop) {
+      ocean_split_prepare_spectrum_reduced(
+          o, level, level_index, OCEAN_SPLIT_FIELD_DISP_X, scale, chop_amount);
+      fftw_execute(level.fft_plan);
+      ocean_split_copy_fft_output(
+          level.disp_x, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+
+      ocean_split_prepare_spectrum_reduced(
+          o, level, level_index, OCEAN_SPLIT_FIELD_DISP_Z, scale, chop_amount);
+      fftw_execute(level.fft_plan);
+      ocean_split_copy_fft_output(
+          level.disp_z, level.fft_out, size_t(level.size_x) * size_t(level.size_y));
+    }
+    else {
+      memset(level.disp_x, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
+      memset(level.disp_z, 0, sizeof(float) * size_t(level.size_x) * size_t(level.size_y));
+    }
+
+    ocean_split_level_update_normals_and_moments(o, level);
+  }
+
+  const OceanSplitLevel &base_level = o->_split_levels[0];
+  for (size_t index = 0; index < size; index++) {
+    if (o->_do_disp_y) {
+      o->_disp_y[index] = double(base_level.disp_y[index]);
+    }
+    if (o->_do_chop) {
+      o->_disp_x[index] = double(base_level.disp_x[index]);
+      o->_disp_z[index] = double(base_level.disp_z[index]);
+    }
+  }
+
+  o->_split_runtime_revision++;
+}
+
+static float ocean_split_sample_bilerp(const float *field,
+                                       const int size_x,
+                                       const int size_y,
+                                       float u,
+                                       float v)
+{
+  if (!field || size_x <= 0 || size_y <= 0) {
+    return 0.0f;
+  }
+
+  u = fmodf(u, 1.0f);
+  v = fmodf(v, 1.0f);
+  if (u < 0.0f) {
+    u += 1.0f;
+  }
+  if (v < 0.0f) {
+    v += 1.0f;
+  }
+
+  const float uu = u * size_x;
+  const float vv = v * size_y;
+  const int x0 = int(floorf(uu)) % size_x;
+  const int y0 = int(floorf(vv)) % size_y;
+  const int x1 = (x0 + 1) % size_x;
+  const int y1 = (y0 + 1) % size_y;
+  const float frac_x = uu - floorf(uu);
+  const float frac_y = vv - floorf(vv);
+
+  return interpf(interpf(field[x1 * size_y + y1], field[x0 * size_y + y1], frac_x),
+                 interpf(field[x1 * size_y + y0], field[x0 * size_y + y0], frac_x),
+                 frac_y);
+}
+
+static float ocean_split_min_wavelength(const Ocean *o)
+{
+  const float cell_x = (o->_M > 0) ? (o->_Lx / float(o->_M)) : 0.0f;
+  const float cell_z = (o->_N > 0) ? (o->_Lz / float(o->_N)) : 0.0f;
+  return std::max(2.0f * std::max(cell_x, cell_z), 1.0e-6f);
+}
+
+static float ocean_split_support_to_level(const Ocean *o, const float support_wavelength)
+{
+  const float min_wavelength = ocean_split_min_wavelength(o);
+  const float clamped_wavelength = std::max(support_wavelength, min_wavelength);
+  return std::max(0.0f, log2f(clamped_wavelength / min_wavelength));
+}
+
+static float ocean_split_level_wavelength(const Ocean *o, const int level_index)
+{
+  return ocean_split_min_wavelength(o) * exp2f(float(level_index));
+}
+
+static float ocean_split_level_variance(const Ocean *o, const int level_index)
+{
+  if (level_index <= 0) {
+    return 0.0f;
+  }
+
+  const float sigma = 0.5f * ocean_split_level_wavelength(o, level_index);
+  const float sigma_min = 0.5f * ocean_split_min_wavelength(o);
+  return std::max(0.0f, sigma * sigma - sigma_min * sigma_min);
+}
+
+static void ocean_split_covariance_eigenvalues(const float covariance[3],
+                                               float *r_minor_variance,
+                                               float *r_major_variance)
+{
+  const float trace = covariance[0] + covariance[2];
+  const float diff = covariance[0] - covariance[2];
+  const float discriminant = sqrtf(std::max(diff * diff + 4.0f * covariance[1] * covariance[1], 0.0f));
+  *r_major_variance = std::max(0.0f, 0.5f * (trace + discriminant));
+  *r_minor_variance = std::max(0.0f, 0.5f * (trace - discriminant));
+}
+
+static void ocean_split_covariance_project_psd(float covariance[3])
+{
+  float minor_variance, major_variance;
+  ocean_split_covariance_eigenvalues(covariance, &minor_variance, &major_variance);
+
+  const float angle = 0.5f * atan2f(2.0f * covariance[1], covariance[0] - covariance[2]);
+  const float c = cosf(angle);
+  const float s = sinf(angle);
+
+  covariance[0] = c * c * major_variance + s * s * minor_variance;
+  covariance[1] = c * s * (major_variance - minor_variance);
+  covariance[2] = s * s * major_variance + c * c * minor_variance;
+}
+
+static int ocean_split_support_base_level(const Ocean *o,
+                                          const OceanSplitSupport &support,
+                                          float *r_base_variance)
+{
+  float minor_variance, major_variance;
+  ocean_split_covariance_eigenvalues(support.covariance, &minor_variance, &major_variance);
+
+  const float minor_wavelength = 2.0f * sqrtf(std::max(minor_variance, 0.0f));
+  int level_index = int(floorf(ocean_split_support_to_level(o, minor_wavelength)));
+  level_index = std::clamp(level_index, 0, o->_split_levels_num - 1);
+
+  float base_variance = ocean_split_level_variance(o, level_index);
+  while (level_index > 0 && base_variance > minor_variance + 1.0e-10f) {
+    level_index--;
+    base_variance = ocean_split_level_variance(o, level_index);
+  }
+
+  *r_base_variance = std::min(base_variance, minor_variance);
+  return level_index;
+}
+
+static void ocean_split_covariance_subtract_isotropic(float r_residual_covariance[3],
+                                                      const float covariance[3],
+                                                      const float isotropic_variance)
+{
+  r_residual_covariance[0] = covariance[0] - isotropic_variance;
+  r_residual_covariance[1] = covariance[1];
+  r_residual_covariance[2] = covariance[2] - isotropic_variance;
+  ocean_split_covariance_project_psd(r_residual_covariance);
+}
+
+static float ocean_split_sample_anisotropic(const float *field,
+                                            const int size_x,
+                                            const int size_y,
+                                            const float u,
+                                            const float v,
+                                            const float residual_covariance[3],
+                                            const float cell_x,
+                                            const float cell_z)
+{
+  float texel_covariance[3] = {
+      residual_covariance[0] / std::max(cell_x * cell_x, 1.0e-12f),
+      residual_covariance[1] / std::max(cell_x * cell_z, 1.0e-12f),
+      residual_covariance[2] / std::max(cell_z * cell_z, 1.0e-12f),
+  };
+  ocean_split_covariance_project_psd(texel_covariance);
+
+  float minor_variance, major_variance;
+  ocean_split_covariance_eigenvalues(texel_covariance, &minor_variance, &major_variance);
+  if (major_variance <= 1.0e-8f) {
+    return ocean_split_sample_bilerp(field, size_x, size_y, u, v);
+  }
+
+  const float determinant = texel_covariance[0] * texel_covariance[2] -
+                            texel_covariance[1] * texel_covariance[1];
+  if (determinant <= 1.0e-10f) {
+    return ocean_split_sample_bilerp(field, size_x, size_y, u, v);
+  }
+
+  const float inv_covariance[3] = {
+      texel_covariance[2] / determinant,
+      -texel_covariance[1] / determinant,
+      texel_covariance[0] / determinant,
+  };
+
+  constexpr float kernel_sigma_radius = 3.5f;
+  constexpr int max_kernel_radius = 16;
+  const int radius_x = std::min(
+      max_kernel_radius,
+      std::max(0, int(ceilf(kernel_sigma_radius * sqrtf(std::max(texel_covariance[0], 0.0f))))));
+  const int radius_y = std::min(
+      max_kernel_radius,
+      std::max(0, int(ceilf(kernel_sigma_radius * sqrtf(std::max(texel_covariance[2], 0.0f))))));
+
+  if (radius_x == 0 && radius_y == 0) {
+    return ocean_split_sample_bilerp(field, size_x, size_y, u, v);
+  }
+
+  const float q_max = kernel_sigma_radius * kernel_sigma_radius;
+  float weight_sum = 0.0f;
+  float value_sum = 0.0f;
+
+  for (int offset_x = -radius_x; offset_x <= radius_x; offset_x++) {
+    for (int offset_y = -radius_y; offset_y <= radius_y; offset_y++) {
+      const float q = inv_covariance[0] * float(offset_x * offset_x) +
+                      2.0f * inv_covariance[1] * float(offset_x * offset_y) +
+                      inv_covariance[2] * float(offset_y * offset_y);
+      if (q > q_max) {
+        continue;
+      }
+
+      const float weight = expf(-0.5f * q);
+      if (weight <= 1.0e-8f) {
+        continue;
+      }
+
+      const float sample_u = u + (float(offset_x) / float(size_x));
+      const float sample_v = v + (float(offset_y) / float(size_y));
+      value_sum += weight * ocean_split_sample_bilerp(field, size_x, size_y, sample_u, sample_v);
+      weight_sum += weight;
+    }
+  }
+
+  if (weight_sum <= 1.0e-8f) {
+    return ocean_split_sample_bilerp(field, size_x, size_y, u, v);
+  }
+  return value_sum / weight_sum;
+}
+
+static float ocean_split_sample_field_support(const Ocean *o,
+                                              float *OceanSplitLevel::*field,
+                                              const float u,
+                                              const float v,
+                                              const OceanSplitSupport &support)
+{
+  if (!o->_split_levels || o->_split_levels_num == 0) {
+    return 0.0f;
+  }
+
+  float base_variance = 0.0f;
+  const int level_index = ocean_split_support_base_level(o, support, &base_variance);
+  const OceanSplitLevel &split_level = o->_split_levels[level_index];
+
+  float residual_covariance[3];
+  ocean_split_covariance_subtract_isotropic(residual_covariance, support.covariance, base_variance);
+
+  const float cell_x = (split_level.size_x > 0) ? (o->_Lx / float(split_level.size_x)) : 0.0f;
+  const float cell_z = (split_level.size_y > 0) ? (o->_Lz / float(split_level.size_y)) : 0.0f;
+
+  return ocean_split_sample_anisotropic(
+      split_level.*field, split_level.size_x, split_level.size_y, u, v, residual_covariance, cell_x, cell_z);
+}
+
+static void ocean_split_support_visible_moment(const Ocean *o,
+                                               const OceanSplitSupport &support,
+                                               float r_moment[3])
+{
+  zero_v3(r_moment);
+  if (!o->_split_levels || o->_split_levels_num == 0) {
+    return;
+  }
+
+  float minor_variance, major_variance;
+  ocean_split_covariance_eigenvalues(support.covariance, &minor_variance, &major_variance);
+
+  float base_variance = 0.0f;
+  const int level_index = ocean_split_support_base_level(o, support, &base_variance);
+  const int next_level_index = std::min(level_index + 1, o->_split_levels_num - 1);
+  const OceanSplitLevel &base_level = o->_split_levels[level_index];
+  const OceanSplitLevel &next_level = o->_split_levels[next_level_index];
+
+  if (next_level_index == level_index) {
+    copy_v3_v3(r_moment, base_level.cumulative_slope_moment);
+    return;
+  }
+
+  const float next_variance = ocean_split_level_variance(o, next_level_index);
+  const float denom = std::max(next_variance - base_variance, 1.0e-12f);
+  const float t = clamp_f((minor_variance - base_variance) / denom, 0.0f, 1.0f);
+
+  r_moment[0] = base_level.cumulative_slope_moment[0] +
+                (next_level.cumulative_slope_moment[0] - base_level.cumulative_slope_moment[0]) * t;
+  r_moment[1] = base_level.cumulative_slope_moment[1] +
+                (next_level.cumulative_slope_moment[1] - base_level.cumulative_slope_moment[1]) * t;
+  r_moment[2] = base_level.cumulative_slope_moment[2] +
+                (next_level.cumulative_slope_moment[2] - base_level.cumulative_slope_moment[2]) * t;
+}
+
+static void ocean_split_slope_from_normal(const float normal[3], float r_slope[2])
+{
+  const float safe_normal_y = (fabsf(normal[1]) > 1.0e-6f) ? normal[1] :
+                                                          ((normal[1] < 0.0f) ? -1.0e-6f :
+                                                                                 1.0e-6f);
+  r_slope[0] = -normal[0] / safe_normal_y;
+  r_slope[1] = -normal[2] / safe_normal_y;
+}
+
+static void ocean_split_sample_normal_support(const Ocean *o,
+                                              float r_normal[3],
+                                              const float u,
+                                              const float v,
+                                              const OceanSplitSupport &support)
+{
+  r_normal[0] = ocean_split_sample_field_support(o, &OceanSplitLevel::normal_x, u, v, support);
+  r_normal[1] = ocean_split_sample_field_support(o, &OceanSplitLevel::normal_y, u, v, support);
+  r_normal[2] = ocean_split_sample_field_support(o, &OceanSplitLevel::normal_z, u, v, support);
+  if (normalize_v3(r_normal) == 0.0f) {
+    r_normal[0] = 0.0f;
+    r_normal[1] = 1.0f;
+    r_normal[2] = 0.0f;
+  }
+}
+
+static OceanSplitSupport ocean_split_isotropic_support(const float wavelength)
+{
+  OceanSplitSupport support{};
+  const float half = 0.5f * wavelength;
+  support.wavelength_x = wavelength;
+  support.wavelength_z = wavelength;
+  support.wavelength_major = wavelength;
+  support.covariance[0] = half * half;
+  support.covariance[1] = 0.0f;
+  support.covariance[2] = half * half;
+  return support;
+}
+
+static void ocean_split_support_sanitize(const Ocean *o, OceanSplitSupport *support)
+{
+  const float min_wavelength = ocean_split_min_wavelength(o);
+
+  support->wavelength_x = std::max(support->wavelength_x, min_wavelength);
+  support->wavelength_z = std::max(support->wavelength_z, min_wavelength);
+  support->wavelength_major = std::max(
+      std::max(support->wavelength_major, support->wavelength_x), support->wavelength_z);
+
+  if (support->covariance[0] <= 0.0f) {
+    const float sigma_x = 0.5f * support->wavelength_x;
+    support->covariance[0] = sigma_x * sigma_x;
+  }
+  if (support->covariance[2] <= 0.0f) {
+    const float sigma_z = 0.5f * support->wavelength_z;
+    support->covariance[2] = sigma_z * sigma_z;
+  }
+
+  const float sigma_limit = sqrtf(fmaxf(support->covariance[0] * support->covariance[2], 0.0f));
+  support->covariance[1] = std::clamp(support->covariance[1], -sigma_limit, sigma_limit);
+}
+
 float BKE_ocean_jminus_to_foam(float jminus, float coverage)
 {
   float foam = jminus * -0.005f + coverage;
@@ -364,6 +1083,323 @@ void BKE_ocean_eval_xz(Ocean *oc, OceanResult *ocr, float x, float z)
 void BKE_ocean_eval_xz_catrom(Ocean *oc, OceanResult *ocr, float x, float z)
 {
   BKE_ocean_eval_uv_catrom(oc, ocr, x / oc->_Lx, z / oc->_Lz);
+}
+
+void BKE_ocean_eval_uv_split_support(Ocean *oc,
+                                     OceanSplitResult *osr,
+                                     float u,
+                                     float v,
+                                     const OceanSplitSupport *geometry_support_in,
+                                     const OceanSplitSupport *camera_support_in)
+{
+  memset(osr, 0, sizeof(*osr));
+  OceanSplitSupport geometry_support = geometry_support_in ?
+                                           *geometry_support_in :
+                                           ocean_split_isotropic_support(0.0f);
+  OceanSplitSupport camera_support = camera_support_in ? *camera_support_in :
+                                                      ocean_split_isotropic_support(0.0f);
+
+  if (!oc) {
+    osr->geometry_normal[1] = 1.0f;
+    osr->visible_normal[1] = 1.0f;
+    osr->geometry_wavelength = geometry_support.wavelength_major;
+    osr->camera_wavelength = camera_support.wavelength_major;
+    osr->geometry_wavelength_xz[0] = geometry_support.wavelength_x;
+    osr->geometry_wavelength_xz[1] = geometry_support.wavelength_z;
+    osr->camera_wavelength_xz[0] = camera_support.wavelength_x;
+    osr->camera_wavelength_xz[1] = camera_support.wavelength_z;
+    copy_v3_v3(osr->geometry_support_covariance, geometry_support.covariance);
+    copy_v3_v3(osr->camera_support_covariance, camera_support.covariance);
+    return;
+  }
+
+  ocean_split_support_sanitize(oc, &geometry_support);
+  ocean_split_support_sanitize(oc, &camera_support);
+
+  osr->geometry_wavelength = geometry_support.wavelength_major;
+  osr->camera_wavelength = camera_support.wavelength_major;
+  osr->geometry_wavelength_xz[0] = geometry_support.wavelength_x;
+  osr->geometry_wavelength_xz[1] = geometry_support.wavelength_z;
+  osr->camera_wavelength_xz[0] = camera_support.wavelength_x;
+  osr->camera_wavelength_xz[1] = camera_support.wavelength_z;
+  copy_v3_v3(osr->geometry_support_covariance, geometry_support.covariance);
+  copy_v3_v3(osr->camera_support_covariance, camera_support.covariance);
+
+  if (!oc->_split_levels || oc->_split_levels_num == 0) {
+    OceanResult full_result{};
+    BKE_ocean_eval_uv(oc, &full_result, u, v);
+    copy_v3_v3(osr->geometry_disp, full_result.disp);
+    copy_v3_v3(osr->geometry_normal, full_result.normal);
+    copy_v3_v3(osr->visible_normal, full_result.normal);
+    if (is_zero_v3(osr->geometry_normal)) {
+      osr->geometry_normal[1] = 1.0f;
+    }
+    if (is_zero_v3(osr->visible_normal)) {
+      osr->visible_normal[1] = 1.0f;
+    }
+    normalize_v3(osr->geometry_normal);
+    normalize_v3(osr->visible_normal);
+    return;
+  }
+
+  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
+
+  osr->geometry_disp[0] = ocean_split_sample_field_support(
+      oc, &OceanSplitLevel::disp_x, u, v, geometry_support);
+  osr->geometry_disp[1] = ocean_split_sample_field_support(
+      oc, &OceanSplitLevel::disp_y, u, v, geometry_support);
+  osr->geometry_disp[2] = ocean_split_sample_field_support(
+      oc, &OceanSplitLevel::disp_z, u, v, geometry_support);
+
+  ocean_split_sample_normal_support(oc, osr->geometry_normal, u, v, geometry_support);
+  ocean_split_sample_normal_support(oc, osr->visible_normal, u, v, camera_support);
+
+  float geometry_slope[2];
+  float visible_slope[2];
+  ocean_split_slope_from_normal(osr->geometry_normal, geometry_slope);
+  ocean_split_slope_from_normal(osr->visible_normal, visible_slope);
+
+  osr->visible_residual_slope[0] = visible_slope[0] - geometry_slope[0];
+  osr->visible_residual_slope[1] = visible_slope[1] - geometry_slope[1];
+
+  float visible_moment[3];
+  ocean_split_support_visible_moment(oc, camera_support, visible_moment);
+
+  osr->unresolved_slope_covariance[0] = oc->_split_levels[0].cumulative_slope_moment[0] -
+                                        visible_moment[0];
+  osr->unresolved_slope_covariance[1] = oc->_split_levels[0].cumulative_slope_moment[1] -
+                                        visible_moment[1];
+  osr->unresolved_slope_covariance[2] = oc->_split_levels[0].cumulative_slope_moment[2] -
+                                        visible_moment[2];
+  ocean_split_covariance_project_psd(osr->unresolved_slope_covariance);
+
+  BLI_rw_mutex_unlock(&oc->oceanmutex);
+}
+
+void BKE_ocean_eval_uv_split(Ocean *oc,
+                             OceanSplitResult *osr,
+                             float u,
+                             float v,
+                             float geometry_wavelength,
+                             float camera_wavelength)
+{
+  const OceanSplitSupport geometry_support = ocean_split_isotropic_support(geometry_wavelength);
+  const OceanSplitSupport camera_support = ocean_split_isotropic_support(camera_wavelength);
+  BKE_ocean_eval_uv_split_support(oc, osr, u, v, &geometry_support, &camera_support);
+}
+
+void BKE_ocean_eval_xz_split_support(Ocean *oc,
+                                     OceanSplitResult *osr,
+                                     float x,
+                                     float z,
+                                     const OceanSplitSupport *geometry_support,
+                                     const OceanSplitSupport *camera_support)
+{
+  if (!oc) {
+    memset(osr, 0, sizeof(*osr));
+    osr->geometry_normal[1] = 1.0f;
+    osr->visible_normal[1] = 1.0f;
+    if (geometry_support) {
+      osr->geometry_wavelength = geometry_support->wavelength_major;
+      osr->geometry_wavelength_xz[0] = geometry_support->wavelength_x;
+      osr->geometry_wavelength_xz[1] = geometry_support->wavelength_z;
+      copy_v3_v3(osr->geometry_support_covariance, geometry_support->covariance);
+    }
+    if (camera_support) {
+      osr->camera_wavelength = camera_support->wavelength_major;
+      osr->camera_wavelength_xz[0] = camera_support->wavelength_x;
+      osr->camera_wavelength_xz[1] = camera_support->wavelength_z;
+      copy_v3_v3(osr->camera_support_covariance, camera_support->covariance);
+    }
+    return;
+  }
+
+  BKE_ocean_eval_uv_split_support(oc, osr, x / oc->_Lx, z / oc->_Lz, geometry_support, camera_support);
+}
+
+void BKE_ocean_eval_xz_split(Ocean *oc,
+                             OceanSplitResult *osr,
+                             float x,
+                             float z,
+                             float geometry_wavelength,
+                             float camera_wavelength)
+{
+  const OceanSplitSupport geometry_support = ocean_split_isotropic_support(geometry_wavelength);
+  const OceanSplitSupport camera_support = ocean_split_isotropic_support(camera_wavelength);
+  BKE_ocean_eval_xz_split_support(oc, osr, x, z, &geometry_support, &camera_support);
+}
+
+int BKE_ocean_split_level_count_get(const Ocean *oc)
+{
+  return (oc && oc->_split_levels) ? oc->_split_levels_num : 0;
+}
+
+float BKE_ocean_split_min_wavelength_get(const Ocean *oc)
+{
+  return oc ? ocean_split_min_wavelength(oc) : 0.0f;
+}
+
+uint64_t BKE_ocean_split_runtime_revision_get(const Ocean *oc)
+{
+  return oc ? oc->_split_runtime_revision : 0;
+}
+
+static bool ocean_split_runtime_level_get_locked(const Ocean *oc,
+                                                 const int level_index,
+                                                 OceanSplitRuntimeLevel *r_level)
+{
+  if (!oc || !r_level || !oc->_split_levels || level_index < 0 || level_index >= oc->_split_levels_num) {
+    return false;
+  }
+
+  const OceanSplitLevel &level = oc->_split_levels[level_index];
+  r_level->size_x = level.size_x;
+  r_level->size_y = level.size_y;
+  r_level->wavelength = level.wavelength;
+  copy_v3_v3(r_level->cumulative_disp_variance, level.cumulative_disp_variance);
+  copy_v3_v3(r_level->cumulative_slope_moment, level.cumulative_slope_moment);
+  return true;
+}
+
+static bool ocean_split_runtime_sample_level_locked(const Ocean *oc,
+                                                    const int level_index,
+                                                    const float u,
+                                                    const float v,
+                                                    float *r_displacement,
+                                                    float *r_normal)
+{
+  if (!oc || !oc->_split_levels || level_index < 0 || level_index >= oc->_split_levels_num ||
+      (!r_displacement && !r_normal))
+  {
+    return false;
+  }
+
+  const OceanSplitLevel &level = oc->_split_levels[level_index];
+  if (r_displacement) {
+    r_displacement[0] = ocean_split_sample_bilerp(level.disp_x, level.size_x, level.size_y, u, v);
+    r_displacement[1] = ocean_split_sample_bilerp(level.disp_y, level.size_x, level.size_y, u, v);
+    r_displacement[2] = ocean_split_sample_bilerp(level.disp_z, level.size_x, level.size_y, u, v);
+  }
+
+  if (r_normal) {
+    r_normal[0] = ocean_split_sample_bilerp(level.normal_x, level.size_x, level.size_y, u, v);
+    r_normal[1] = ocean_split_sample_bilerp(level.normal_y, level.size_x, level.size_y, u, v);
+    r_normal[2] = ocean_split_sample_bilerp(level.normal_z, level.size_x, level.size_y, u, v);
+    if (normalize_v3(r_normal) == 0.0f) {
+      r_normal[0] = 0.0f;
+      r_normal[1] = 1.0f;
+      r_normal[2] = 0.0f;
+    }
+  }
+
+  return true;
+}
+
+bool BKE_ocean_split_runtime_level_get(const Ocean *oc,
+                                       const int level_index,
+                                       OceanSplitRuntimeLevel *r_level)
+{
+  if (!oc) {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+  const bool success = ocean_split_runtime_level_get_locked(oc, level_index, r_level);
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+  return success;
+}
+
+bool BKE_ocean_split_runtime_sample_level(const Ocean *oc,
+                                          const int level_index,
+                                          const float u,
+                                          const float v,
+                                          float *r_displacement,
+                                          float *r_normal)
+{
+  if (!oc) {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+  const bool success = ocean_split_runtime_sample_level_locked(
+      oc, level_index, u, v, r_displacement, r_normal);
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+  return success;
+}
+
+bool BKE_ocean_split_runtime_read_begin(const Ocean *oc, OceanSplitRuntimeReadScope *r_scope)
+{
+  if (!oc || !r_scope) {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+  r_scope->ocean = oc;
+  return true;
+}
+
+void BKE_ocean_split_runtime_read_end(OceanSplitRuntimeReadScope *scope)
+{
+  if (!scope || !scope->ocean) {
+    return;
+  }
+
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&scope->ocean->oceanmutex));
+  scope->ocean = nullptr;
+}
+
+bool BKE_ocean_split_runtime_level_get_in_scope(const OceanSplitRuntimeReadScope *scope,
+                                                const int level_index,
+                                                OceanSplitRuntimeLevel *r_level)
+{
+  return scope ? ocean_split_runtime_level_get_locked(scope->ocean, level_index, r_level) : false;
+}
+
+bool BKE_ocean_split_runtime_sample_level_in_scope(const OceanSplitRuntimeReadScope *scope,
+                                                   const int level_index,
+                                                   const float u,
+                                                   const float v,
+                                                   float *r_displacement,
+                                                   float *r_normal)
+{
+  return scope ?
+             ocean_split_runtime_sample_level_locked(
+                 scope->ocean, level_index, u, v, r_displacement, r_normal) :
+             false;
+}
+
+bool BKE_ocean_split_runtime_level_normal_data_get(const Ocean *oc,
+                                                   const int level_index,
+                                                   float *r_normal_data,
+                                                   const int normal_data_len)
+{
+  if (!oc || !r_normal_data || !oc->_split_levels || level_index < 0 ||
+      level_index >= oc->_split_levels_num)
+  {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+
+  const OceanSplitLevel &level = oc->_split_levels[level_index];
+  const size_t pixel_count = size_t(level.size_x) * size_t(level.size_y);
+  const size_t expected_len = pixel_count * 4;
+  if (level.size_x <= 0 || level.size_y <= 0 || normal_data_len < 0 ||
+      size_t(normal_data_len) < expected_len)
+  {
+    BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+    return false;
+  }
+
+  for (size_t index = 0; index < pixel_count; index++) {
+    r_normal_data[index * 4 + 0] = level.normal_x[index];
+    r_normal_data[index * 4 + 1] = level.normal_y[index];
+    r_normal_data[index * 4 + 2] = level.normal_z[index];
+    r_normal_data[index * 4 + 3] = 1.0f;
+  }
+
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+  return true;
 }
 
 void BKE_ocean_eval_ij(Ocean *oc, OceanResult *ocr, int i, int j)
@@ -694,6 +1730,10 @@ void BKE_ocean_simulate(Ocean *o, float t, float scale, float chop_amount)
 
   BLI_task_pool_work_and_wait(pool);
 
+  if (o->_do_split) {
+    ocean_split_build_spectral_pyramid(o, scale, chop_amount);
+  }
+
   BLI_rw_mutex_unlock(&o->oceanmutex);
 
   BLI_task_pool_free(pool);
@@ -738,6 +1778,10 @@ Ocean *BKE_ocean_add()
   Ocean *oc = MEM_new_zeroed<Ocean>("ocean sim data");
 
   BLI_rw_mutex_init(&oc->oceanmutex);
+  oc->_do_split = false;
+  oc->_split_levels_num = 0;
+  oc->_split_levels = nullptr;
+  oc->_split_runtime_revision = 0;
 
   return oc;
 }
@@ -761,37 +1805,43 @@ bool BKE_ocean_ensure(OceanModifierData *omd, const int resolution)
 bool BKE_ocean_init_from_modifier(Ocean *ocean, OceanModifierData const *omd, const int resolution)
 {
   short do_heightfield, do_chop, do_normals, do_jacobian, do_spray;
+  const bool do_split = (omd->flag & MOD_OCEAN_USE_CAMERA_LOD) != 0 &&
+                        omd->geometry_mode == MOD_OCEAN_GEOM_GENERATE;
 
   do_heightfield = true;
   do_chop = (omd->chop_amount > 0);
-  do_normals = (omd->flag & MOD_OCEAN_GENERATE_NORMALS);
+  do_normals = do_split || (omd->flag & MOD_OCEAN_GENERATE_NORMALS);
   do_jacobian = (omd->flag & MOD_OCEAN_GENERATE_FOAM);
   do_spray = do_jacobian && (omd->flag & MOD_OCEAN_GENERATE_SPRAY);
 
   BKE_ocean_free_data(ocean);
 
-  return BKE_ocean_init(ocean,
-                        resolution * resolution,
-                        resolution * resolution,
-                        omd->spatial_size,
-                        omd->spatial_size,
-                        omd->wind_velocity,
-                        omd->smallest_wave,
-                        1.0,
-                        omd->wave_direction,
-                        omd->damp,
-                        omd->wave_alignment,
-                        omd->depth,
-                        omd->time,
-                        omd->spectrum,
-                        omd->fetch_jonswap,
-                        omd->sharpen_peak_jonswap,
-                        do_heightfield,
-                        do_chop,
-                        do_spray,
-                        do_normals,
-                        do_jacobian,
-                        omd->seed);
+  const bool initialized = BKE_ocean_init(ocean,
+                                          resolution * resolution,
+                                          resolution * resolution,
+                                          omd->spatial_size,
+                                          omd->spatial_size,
+                                          omd->wind_velocity,
+                                          omd->smallest_wave,
+                                          1.0,
+                                          omd->wave_direction,
+                                          omd->damp,
+                                          omd->wave_alignment,
+                                          omd->depth,
+                                          omd->time,
+                                          omd->spectrum,
+                                          omd->fetch_jonswap,
+                                          omd->sharpen_peak_jonswap,
+                                          do_heightfield,
+                                          do_chop,
+                                          do_spray,
+                                          do_normals,
+                                          do_jacobian,
+                                          omd->seed);
+  if (initialized) {
+    ocean->_do_split = do_split;
+  }
+  return initialized;
 }
 
 bool BKE_ocean_init(Ocean *o,
@@ -1094,6 +2144,9 @@ void BKE_ocean_free_data(Ocean *oc)
     MEM_delete(oc->_kx);
     MEM_delete(oc->_kz);
   }
+
+  ocean_free_split_data(oc);
+  oc->_do_split = false;
 
   BLI_rw_mutex_unlock(&oc->oceanmutex);
 }
@@ -1573,6 +2626,105 @@ void BKE_ocean_eval_uv_catrom(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*u*/
 void BKE_ocean_eval_xz(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*x*/, float /*z*/) {}
 
 void BKE_ocean_eval_xz_catrom(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*x*/, float /*z*/) {}
+
+void BKE_ocean_eval_uv_split_support(Ocean * /*oc*/,
+                                     OceanSplitResult *osr,
+                                     float /*u*/,
+                                     float /*v*/,
+                                     const OceanSplitSupport *geometry_support,
+                                     const OceanSplitSupport *camera_support)
+{
+  memset(osr, 0, sizeof(*osr));
+  osr->geometry_normal[1] = 1.0f;
+  osr->visible_normal[1] = 1.0f;
+
+  if (geometry_support) {
+    osr->geometry_wavelength = geometry_support->wavelength_major;
+    osr->geometry_wavelength_xz[0] = geometry_support->wavelength_x;
+    osr->geometry_wavelength_xz[1] = geometry_support->wavelength_z;
+    copy_v3_v3(osr->geometry_support_covariance, geometry_support->covariance);
+  }
+  if (camera_support) {
+    osr->camera_wavelength = camera_support->wavelength_major;
+    osr->camera_wavelength_xz[0] = camera_support->wavelength_x;
+    osr->camera_wavelength_xz[1] = camera_support->wavelength_z;
+    copy_v3_v3(osr->camera_support_covariance, camera_support->covariance);
+  }
+}
+
+void BKE_ocean_eval_uv_split(Ocean * /*oc*/,
+                             OceanSplitResult *osr,
+                             float /*u*/,
+                             float /*v*/,
+                             float geometry_wavelength,
+                             float camera_wavelength)
+{
+  memset(osr, 0, sizeof(*osr));
+  osr->geometry_normal[1] = 1.0f;
+  osr->visible_normal[1] = 1.0f;
+  osr->geometry_wavelength = geometry_wavelength;
+  osr->camera_wavelength = camera_wavelength;
+}
+
+void BKE_ocean_eval_xz_split_support(Ocean * /*oc*/,
+                                     OceanSplitResult *osr,
+                                     float /*x*/,
+                                     float /*z*/,
+                                     const OceanSplitSupport *geometry_support,
+                                     const OceanSplitSupport *camera_support)
+{
+  BKE_ocean_eval_uv_split_support(nullptr, osr, 0.0f, 0.0f, geometry_support, camera_support);
+}
+
+void BKE_ocean_eval_xz_split(Ocean * /*oc*/,
+                             OceanSplitResult *osr,
+                             float /*x*/,
+                             float /*z*/,
+                             float geometry_wavelength,
+                             float camera_wavelength)
+{
+  BKE_ocean_eval_uv_split(nullptr, osr, 0.0f, 0.0f, geometry_wavelength, camera_wavelength);
+}
+
+int BKE_ocean_split_level_count_get(const Ocean * /*oc*/)
+{
+  return 0;
+}
+
+float BKE_ocean_split_min_wavelength_get(const Ocean * /*oc*/)
+{
+  return 0.0f;
+}
+
+uint64_t BKE_ocean_split_runtime_revision_get(const Ocean * /*oc*/)
+{
+  return 0;
+}
+
+bool BKE_ocean_split_runtime_level_get(const Ocean * /*oc*/,
+                                       const int /*level_index*/,
+                                       OceanSplitRuntimeLevel * /*r_level*/)
+{
+  return false;
+}
+
+bool BKE_ocean_split_runtime_sample_level(const Ocean * /*oc*/,
+                                          const int /*level_index*/,
+                                          const float /*u*/,
+                                          const float /*v*/,
+                                          float * /*r_displacement*/,
+                                          float * /*r_normal*/)
+{
+  return false;
+}
+
+bool BKE_ocean_split_runtime_level_normal_data_get(const Ocean * /*oc*/,
+                                                   const int /*level_index*/,
+                                                   float * /*r_normal_data*/,
+                                                   const int /*normal_data_len*/)
+{
+  return false;
+}
 
 void BKE_ocean_eval_ij(Ocean * /*oc*/, OceanResult * /*ocr*/, int /*i*/, int /*j*/) {}
 
