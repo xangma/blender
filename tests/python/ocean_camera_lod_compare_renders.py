@@ -21,6 +21,11 @@ def create_argparser():
     parser.add_argument("--candidate", required=True, help="Dense optimized or LOD optimized render path.")
     parser.add_argument("--outdir", required=True)
     parser.add_argument("--label", default="candidate")
+    parser.add_argument(
+        "--no-diff-images",
+        action="store_true",
+        help="Only write the JSON metrics report; skip PNG diff visualizations.",
+    )
     return parser
 
 
@@ -44,8 +49,9 @@ def main():
     )
     diff_abs = outdir / f"{args.label}_diff_abs.png"
     diff_gradient = outdir / f"{args.label}_diff_gradient.png"
-    ocean_metrics.save_rgba_image(str(diff_abs), ref_width, ref_height, rgba_abs)
-    ocean_metrics.save_rgba_image(str(diff_gradient), ref_width, ref_height, rgba_gradient)
+    if not args.no_diff_images:
+        ocean_metrics.save_rgba_image(str(diff_abs), ref_width, ref_height, rgba_abs)
+        ocean_metrics.save_rgba_image(str(diff_gradient), ref_width, ref_height, rgba_gradient)
 
     result = {
         "reference": args.reference,
@@ -54,8 +60,8 @@ def main():
         "width": ref_width,
         "height": ref_height,
         "report": asdict(report),
-        "diff_abs": str(diff_abs),
-        "diff_gradient": str(diff_gradient),
+        "diff_abs": None if args.no_diff_images else str(diff_abs),
+        "diff_gradient": None if args.no_diff_images else str(diff_gradient),
     }
     ocean_metrics.write_json(outdir / f"{args.label}_render_compare.json", result)
 
