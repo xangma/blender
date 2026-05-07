@@ -6456,6 +6456,32 @@ void blo_do_versions_450(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
     }
   }
 
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 90)) {
+    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
+      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+        if (md->type != eModifierType_Ocean) {
+          continue;
+        }
+
+        OceanModifierData *omd = (OceanModifierData *)md;
+        omd->lod_levels = 5;
+      }
+    }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 405, 91)) {
+    LISTBASE_FOREACH (Object *, ob, &bmain->objects) {
+      LISTBASE_FOREACH (ModifierData *, md, &ob->modifiers) {
+        if (md->type != eModifierType_Ocean) {
+          continue;
+        }
+
+        OceanModifierData *omd = (OceanModifierData *)md;
+        omd->lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+      }
+    }
+  }
+
   /* Always run this versioning (keep at the bottom of the function). Meshes are written with the
    * legacy format which always needs to be converted to the new format on file load. To be moved
    * to a subversion check in 5.0. */
