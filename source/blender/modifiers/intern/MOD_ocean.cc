@@ -2235,6 +2235,7 @@ struct OceanCameraLODSettings {
   float2 center = float2(0.0f, 0.0f);
   OceanLODObservableTolerances tolerances;
   bool full_domain_dense = false;
+  bool dense_ceiling = false;
   const char *error_message = nullptr;
   OceanLODRelevantFootprint visible_footprint;
   OceanCameraProjectionSet projection_set;
@@ -2263,7 +2264,8 @@ static bool ocean_camera_lod_leaves_cover_finest_grid(const OceanCameraLODSettin
 static bool ocean_camera_lod_uses_dense_generate_fast_path(const OceanCameraLODSettings &settings)
 {
   return settings.projection_set.valid && !settings.levels.is_empty() &&
-         (settings.full_domain_dense || ocean_camera_lod_leaves_cover_finest_grid(settings));
+         (settings.full_domain_dense || settings.dense_ceiling ||
+          ocean_camera_lod_leaves_cover_finest_grid(settings));
 }
 
 static void ocean_camera_lod_init_dense_mesh_metadata(const Mesh &mesh,
@@ -3162,7 +3164,7 @@ static bool ocean_camera_lod_leaf_needs_split(const OceanModifierData *omd,
 
 static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
                                           const Span<OceanSplitMomentLevel> moment_levels,
-                                          const OceanCameraLODSettings &settings,
+                                          OceanCameraLODSettings &settings,
                                           const OceanSplitRuntimeReadScope *read_scope,
                                           Vector<OceanCameraLODLeaf> &r_leaves)
 {
@@ -3172,9 +3174,26 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
   double balance_s = 0.0;
 
   r_leaves.clear();
+  settings.dense_ceiling = false;
   if (settings.full_domain_dense || settings.levels.is_empty()) {
     return;
   }
+
+  const auto log_leaf_build = [&](const char *selection, const int64_t leaves) {
+    if (!profile_enabled) {
+      return;
+    }
+    ocean_camera_lod_profile_logf("<settings>",
+                                  "leaf_build",
+                                  "selection=%s total_s=%.6f select_s=%.6f balance_s=%.6f "
+                                  "leaves=%lld dense_cells=%d",
+                                  selection,
+                                  BLI_time_now_seconds() - profile_start,
+                                  select_s,
+                                  balance_s,
+                                  static_cast<long long>(leaves),
+                                  settings.dense_cells_per_side);
+  };
 
   const OceanCameraLODLevel &coarsest_level = settings.levels.last();
   const int root_stride = coarsest_level.stride;
@@ -3242,6 +3261,24 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       }
     }
 
+    bool finest_parent_frontier = true;
+    for (const OceanCameraLODLeaf &leaf : frontier) {
+      if (leaf.local_level_index != 1) {
+        finest_parent_frontier = false;
+        break;
+      }
+    }
+    if (r_leaves.is_empty() && keep_count == 0 && split_count == frontier.size() &&
+        finest_parent_frontier)
+    {
+      settings.dense_ceiling = true;
+      select_s = profile_enabled ? (BLI_time_now_seconds() - profile_start) : 0.0;
+      const int64_t dense_leaf_count = int64_t(settings.dense_cells_per_side) *
+                                       int64_t(settings.dense_cells_per_side);
+      log_leaf_build("dense_ceiling", dense_leaf_count);
+      return;
+    }
+
     Vector<OceanCameraLODLeaf> next_frontier;
     next_frontier.reserve(split_count * 4);
     r_leaves.reserve(r_leaves.size() + keep_count);
@@ -3277,15 +3314,7 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
   ocean_camera_lod_balance_leaves(r_leaves, settings.dense_cells_per_side);
   if (profile_enabled) {
     balance_s = BLI_time_now_seconds() - balance_start;
-    ocean_camera_lod_profile_logf("<settings>",
-                                  "leaf_build",
-                                  "selection=sampled total_s=%.6f select_s=%.6f balance_s=%.6f "
-                                  "leaves=%d dense_cells=%d",
-                                  BLI_time_now_seconds() - profile_start,
-                                  select_s,
-                                  balance_s,
-                                  int(r_leaves.size()),
-                                  settings.dense_cells_per_side);
+    log_leaf_build("sampled", r_leaves.size());
   }
 }
 
@@ -3432,7 +3461,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
         profile_stage ? profile_stage : "settings",
         "mode=%s selection=%s resolution=%d total_s=%.6f projection_s=%.6f leaf_build_s=%.6f "
         "region_stats_s=%.6f region_calls=%d region_samples=%d sample_eval_s=%.6f sample_evals=%d "
-        "hard_cap_exits=%d quadtree_levels=%d dense_budget=%d",
+        "hard_cap_exits=%d dense_ceiling=%d quadtree_levels=%d dense_budget=%d",
         settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT ? "GEOMETRY_STRICT" :
                                                                               "CAMERA_OBSERVABLE",
         build_leaves ? "sampled" : "cached_topology",
@@ -3446,6 +3475,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
         region_profile.sample_eval_s,
         region_profile.sample_eval_count,
         region_profile.hard_cap_exit_count,
+        int(settings.dense_ceiling),
         settings.quadtree_levels,
         settings.dense_vert_budget);
   }
@@ -4124,11 +4154,10 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   bool allocated_ocean = false;
   const bool requested_camera_lod = ocean_use_camera_lod(omd);
   const char *camera_lod_dense_fallback_reason = nullptr;
-  const bool use_camera_lod =
+  bool use_camera_lod =
       requested_camera_lod &&
       !ocean_camera_lod_requires_dense_fallback(ctx, omd, &camera_lod_dense_fallback_reason);
-  const bool camera_lod_cycles_shading = use_camera_lod &&
-                                         ocean_camera_lod_uses_cycles_shading(ctx);
+  bool camera_lod_cycles_shading = use_camera_lod && ocean_camera_lod_uses_cycles_shading(ctx);
   if (requested_camera_lod && !use_camera_lod && camera_lod_dense_fallback_reason != nullptr) {
     BKE_modifier_set_error(ctx->object, md, "%s", camera_lod_dense_fallback_reason);
   }
@@ -4235,6 +4264,13 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
                                                     !camera_lod_topology_cache_hit);
     if (profile_enabled) {
       settings_requery_s = BLI_time_now_seconds() - settings_start;
+    }
+    if (camera_lod_settings.dense_ceiling) {
+      camera_lod_dense_fast_path = true;
+      use_camera_lod = false;
+      camera_lod_cycles_shading = false;
+      camera_lod_topology_cache_enabled = false;
+      camera_lod_topology_cache_hit = false;
     }
   }
 
