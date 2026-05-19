@@ -230,6 +230,51 @@ ccl_device_inline float3 ocean_split_support_visible_moment(
   return base_moment + t * (next_moment - base_moment);
 }
 
+ccl_device_inline float3 ocean_split_level_moment_at_time(const ccl_global KernelObject *kobject,
+                                                          const ccl_private ShaderData *sd,
+                                                          const int level_index)
+{
+  const float3 moment = kobject->ocean_split_cumulative_slope_moments[level_index];
+  if (sd->time <= 0.5f && kobject->ocean_split_slope_texture_slots_pre[level_index] >= 0)
+  {
+    const float3 pre_moment = kobject->ocean_split_cumulative_slope_moments_pre[level_index];
+    return interp(pre_moment, moment, clamp(sd->time * 2.0f, 0.0f, 1.0f));
+  }
+  if (sd->time > 0.5f && kobject->ocean_split_slope_texture_slots_post[level_index] >= 0)
+  {
+    const float3 post_moment = kobject->ocean_split_cumulative_slope_moments_post[level_index];
+    return interp(moment, post_moment, clamp((sd->time - 0.5f) * 2.0f, 0.0f, 1.0f));
+  }
+  return moment;
+}
+
+ccl_device_inline float3 ocean_split_support_visible_moment_at_time(
+    const ccl_global KernelObject *kobject,
+    const ccl_private ShaderData *sd,
+    const float3 support_covariance)
+{
+  float minor_variance, major_variance;
+  ocean_split_covariance_eigenvalues(support_covariance, &minor_variance, &major_variance);
+
+  float base_variance = 0.0f;
+  const int level_index = ocean_split_support_base_level(
+      kobject, support_covariance, &base_variance);
+  const int next_level_index = min(level_index + 1, kobject->ocean_split_level_count - 1);
+
+  const float3 base_moment = ocean_split_level_moment_at_time(kobject, sd, level_index);
+  if (next_level_index == level_index) {
+    return base_moment;
+  }
+
+  const float next_variance = ocean_split_level_variance(kobject, next_level_index);
+  const float t = clamp(
+      (minor_variance - base_variance) / fmaxf(next_variance - base_variance, 1.0e-12f),
+      0.0f,
+      1.0f);
+  const float3 next_moment = ocean_split_level_moment_at_time(kobject, sd, next_level_index);
+  return base_moment + t * (next_moment - base_moment);
+}
+
 ccl_device_inline bool ocean_split_geometry_normal_canonical(
     KernelGlobals kg, const ccl_private ShaderData *sd, ccl_private float3 *r_geometry_normal)
 {
@@ -324,6 +369,19 @@ ccl_device_inline bool ocean_split_geometry_support_covariance(
 ccl_device_inline bool ocean_split_camera_support_covariance(
     KernelGlobals kg, const ccl_private ShaderData *sd, ccl_private float3 *r_covariance)
 {
+  float3 ref_coord, drefdx, drefdy;
+  if (ocean_split_ref_coord(kg, sd, &ref_coord, &drefdx, &drefdy)) {
+    (void)ref_coord;
+    const float3 covariance = ocean_split_covariance_project_psd(
+        make_float3(0.25f * (drefdx.x * drefdx.x + drefdy.x * drefdy.x),
+                    0.25f * (drefdx.x * drefdx.z + drefdy.x * drefdy.z),
+                    0.25f * (drefdx.z * drefdx.z + drefdy.z * drefdy.z)));
+    if (covariance.x + covariance.z > 1.0e-20f) {
+      *r_covariance = covariance;
+      return true;
+    }
+  }
+
   float3 geometry_normal_world;
   if (!ocean_split_geometry_normal(kg, sd, &geometry_normal_world, nullptr)) {
     return false;
@@ -500,15 +558,30 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
     return false;
   }
 
-  float geometry_base_variance = 0.0f;
-  const int geometry_base_level = ocean_split_support_base_level(
-      kobject, geometry_support_covariance, &geometry_base_variance);
-  (void)geometry_base_variance;
-  if (geometry_base_level <= 0) {
-    return false;
-  }
+  const bool use_camera_brdf = (kobject->ocean_split_shading_mode ==
+                                OCEAN_SPLIT_SHADING_CAMERA_BRDF);
+  float3 camera_support_covariance = zero_float3();
+  float visible_base_variance = 0.0f;
+  int level_index = 0;
+  float3 residual_covariance = zero_float3();
 
-  const int level_index = 0;
+  if (use_camera_brdf) {
+    if (ocean_split_camera_support_covariance(kg, sd, &camera_support_covariance)) {
+      level_index = ocean_split_support_base_level(
+          kobject, camera_support_covariance, &visible_base_variance);
+      residual_covariance = ocean_split_covariance_subtract_isotropic(
+          camera_support_covariance, visible_base_variance);
+    }
+  }
+  else {
+    float geometry_base_variance = 0.0f;
+    const int geometry_base_level = ocean_split_support_base_level(
+        kobject, geometry_support_covariance, &geometry_base_variance);
+    (void)geometry_base_variance;
+    if (geometry_base_level <= 0) {
+      return false;
+    }
+  }
 
   int slot0 = -1;
   int slot1 = -1;
@@ -518,7 +591,6 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
     return false;
   }
 
-  const float3 residual_covariance = zero_float3();
   const float2 slope0 = ocean_split_sample_slope_anisotropic(kg,
                                                              slot0,
                                                              ref_uv,
@@ -547,7 +619,7 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
   *r_geometry_slope = make_float2(-geometry_normal.x / geometry_normal.y,
                                   -geometry_normal.z / geometry_normal.y);
   *r_geometry_support_covariance = geometry_support_covariance;
-  *r_camera_support_covariance = zero_float3();
+  *r_camera_support_covariance = camera_support_covariance;
   *r_level_index = level_index;
   return true;
 }
@@ -591,15 +663,28 @@ ccl_device_inline bool ocean_split_visible_normal(KernelGlobals kg,
 ccl_device_inline bool ocean_split_unresolved_covariance(
     KernelGlobals kg, const ccl_private ShaderData *sd, ccl_private float3 *r_covariance)
 {
-  (void)kg;
-  (void)sd;
-
-  /* The camera LOD render path reconstructs the dense/reference slope field directly from split
-   * level 0 at shader hit time. There is no omitted shading band left to fold into roughness here;
-   * adding screen-footprint covariance on top of the full-spectrum normal creates a visible
-   * camera-footprint brightness bias instead of matching the dense render. */
   *r_covariance = zero_float3();
-  return false;
+  if (!ocean_split_object_has_data(kg, sd)) {
+    return false;
+  }
+
+  const ccl_global KernelObject *kobject = ocean_split_object_data(kg, sd);
+  if (kobject->ocean_split_shading_mode != OCEAN_SPLIT_SHADING_CAMERA_BRDF ||
+      kobject->ocean_split_level_count <= 0)
+  {
+    return false;
+  }
+
+  float3 camera_support_covariance;
+  if (!ocean_split_camera_support_covariance(kg, sd, &camera_support_covariance)) {
+    return false;
+  }
+
+  const float3 full_moment = ocean_split_level_moment_at_time(kobject, sd, 0);
+  const float3 visible_moment = ocean_split_support_visible_moment_at_time(
+      kobject, sd, camera_support_covariance);
+  *r_covariance = ocean_split_covariance_project_psd(full_moment - visible_moment);
+  return (r_covariance->x + r_covariance->z) > 1.0e-8f;
 }
 
 CCL_NAMESPACE_END

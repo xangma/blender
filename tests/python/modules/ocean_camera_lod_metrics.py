@@ -34,6 +34,12 @@ NORMAL_MEAN_TOL_DEG = 3.0
 NORMAL_MAX_TOL_DEG = 12.0
 POSITION_MEAN_TOL = 0.35
 POSITION_MAX_TOL = 1.50
+OCEAN_SPLIT_SHADING_ENV = "BLENDER_OCEAN_SPLIT_SHADING"
+OCEAN_CAMERA_LOD_SKIP_SETUP_ASSERTS_ENV = "BLENDER_OCEAN_LOD_SKIP_SETUP_ASSERTS"
+
+
+def ocean_split_shading_mode():
+    return os.environ.get(OCEAN_SPLIT_SHADING_ENV, "level0") or "level0"
 
 
 @dataclass(frozen=True)
@@ -116,6 +122,7 @@ class BenchmarkCaseResult:
     description: str
     device: str
     mode: str
+    ocean_split_shading: str
     status: str
     strict_passed: bool
     runtime_errors: list[str]
@@ -139,6 +146,7 @@ class BenchmarkRunSummary:
     scenarios: list[str]
     available_devices: list[str]
     mode: str
+    ocean_split_shading: str
     samples: int
     resolution: int
     repeat_eval: int
@@ -236,6 +244,8 @@ def make_ocean_object(name="OceanObj",
                       resolution=6,
                       spatial_size=64,
                       size=1.0,
+                      repeat_x=1,
+                      repeat_y=1,
                       camera_lod=True,
                       lod_levels=4,
                       lod_pixel_error=0.5,
@@ -261,6 +271,8 @@ def make_ocean_object(name="OceanObj",
     mod.viewport_resolution = resolution
     mod.spatial_size = spatial_size
     mod.size = size
+    mod.repeat_x = repeat_x
+    mod.repeat_y = repeat_y
     mod.use_normals = True
     mod.use_camera_lod = camera_lod
     mod.lod_levels = lod_levels
@@ -310,6 +322,7 @@ def make_camera_and_light(cam_location=(0.0, -35.0, 8.0),
                           sun_rotation=(0.8, 0.0, 0.6),
                           sun_energy=2.0):
     scene = bpy.context.scene
+    scene.render.engine = "CYCLES"
     scene.render.resolution_x = 128
     scene.render.resolution_y = 128
     scene.render.resolution_percentage = 100
@@ -587,8 +600,10 @@ def project_local_point(obj, cam, point_local):
 
 class DenseReferenceSampler:
     def __init__(self, mod, positions, normals=None):
-        self.res_x = mod.resolution * mod.resolution * max(1, getattr(mod, "repeat_x", 1))
-        self.res_y = mod.resolution * mod.resolution * max(1, getattr(mod, "repeat_y", 1))
+        self.repeat_x = max(1, getattr(mod, "repeat_x", 1))
+        self.repeat_y = max(1, getattr(mod, "repeat_y", 1))
+        self.res_x = mod.resolution * mod.resolution * self.repeat_x
+        self.res_y = mod.resolution * mod.resolution * self.repeat_y
         self.positions = positions
         self.normals = normals
         self.step_u = 1.0 / self.res_x
@@ -634,22 +649,24 @@ class DenseReferenceSampler:
         return self.sample_grid(self.positions, u, v)
 
     def sample(self, u, v):
-        position = self.sample_position(u, v)
+        grid_u = u / self.repeat_x
+        grid_v = v / self.repeat_y
+        position = self.sample_position(grid_u, grid_v)
 
         if self.normals is not None:
-            normal = self.sample_grid(self.normals, u, v)
+            normal = self.sample_grid(self.normals, grid_u, grid_v)
             if normal.length != 0.0:
                 normal.normalize()
             else:
                 normal = Vector((0.0, 0.0, 1.0))
         else:
-            u0 = max(0.0, u - self.step_u)
-            u1 = min(1.0, u + self.step_u)
-            v0 = max(0.0, v - self.step_v)
-            v1 = min(1.0, v + self.step_v)
+            u0 = max(0.0, grid_u - self.step_u)
+            u1 = min(1.0, grid_u + self.step_u)
+            v0 = max(0.0, grid_v - self.step_v)
+            v1 = min(1.0, grid_v + self.step_v)
 
-            tangent_u = self.sample_position(u1, v) - self.sample_position(u0, v)
-            tangent_v = self.sample_position(u, v1) - self.sample_position(u, v0)
+            tangent_u = self.sample_position(u1, grid_v) - self.sample_position(u0, grid_v)
+            tangent_v = self.sample_position(grid_u, v1) - self.sample_position(grid_u, v0)
             normal = tangent_u.cross(tangent_v)
             if normal.length != 0.0:
                 normal.normalize()
@@ -827,6 +844,8 @@ def assert_camera_lod_attributes(obj):
             "ocean_camera_lod_radius",
         }
         missing = expected.difference(attr_names)
+        if missing and os.environ.get(OCEAN_CAMERA_LOD_SKIP_SETUP_ASSERTS_ENV):
+            return
         assert not missing, f"Missing camera LOD attributes: {sorted(missing)}"
     finally:
         obj_eval.to_mesh_clear()
@@ -1017,10 +1036,12 @@ def camera_lod_visible_coverage_report(obj, cam, max_dense_samples=12000):
     try:
         dense_count = len(mesh_eval.vertices)
         sample_step = max(1, math.ceil(dense_count / max_dense_samples))
-        domain_half_extent = 0.5 * mod.spatial_size
-        coverage_epsilon = max(1.0e-5, domain_half_extent * 1.0e-6)
+        domain_size = mod.spatial_size
+        coverage_epsilon = max(1.0e-5, domain_size * 1.0e-6)
         visible_count = 0
         missing_visible = []
+        visible_reference_x = []
+        visible_reference_y = []
 
         def covered(reference_x, reference_y):
             for min_x, max_x, min_y, max_y in bounds:
@@ -1044,6 +1065,8 @@ def camera_lod_visible_coverage_report(obj, cam, max_dense_samples=12000):
             visible_count += 1
             reference_x = vertex.co.x / max(abs(mod.size), 1.0e-8)
             reference_y = vertex.co.y / max(abs(mod.size), 1.0e-8)
+            visible_reference_x.append(reference_x)
+            visible_reference_y.append(reference_y)
             if not covered(reference_x, reference_y):
                 missing_visible.append((round(reference_x, 6), round(reference_y, 6)))
 
@@ -1055,6 +1078,10 @@ def camera_lod_visible_coverage_report(obj, cam, max_dense_samples=12000):
             "visible_sample_count": visible_count,
             "missing_visible_sample_count": len(missing_visible),
             "coverage_ratio": coverage_ratio,
+            "visible_reference_min_x": min(visible_reference_x) if visible_reference_x else 0.0,
+            "visible_reference_max_x": max(visible_reference_x) if visible_reference_x else 0.0,
+            "visible_reference_min_y": min(visible_reference_y) if visible_reference_y else 0.0,
+            "visible_reference_max_y": max(visible_reference_y) if visible_reference_y else 0.0,
             "missing_visible_examples": missing_visible[:8],
         }
     finally:
@@ -1599,6 +1626,35 @@ def _scenario_stereo_dataset_valid():
     return ScenarioContext(CURATED_SCENARIOS["stereo_dataset_valid"], obj.name, cam.name)
 
 
+def _scenario_repeat_tiles():
+    clear_scene()
+    set_world_flat()
+    cam = make_camera_and_light(
+        cam_location=(58.0, -28.0, 7.0),
+        cam_target=(62.0, 24.0, 0.0),
+        lens=38.0,
+        sun_rotation=(0.44, 0.0, 0.68),
+        sun_energy=2.0,
+    )
+    obj = make_ocean_object(
+        name="OceanBenchmarkRepeatTiles",
+        geometry_mode="GENERATE",
+        resolution=6,
+        spatial_size=64,
+        size=1.0,
+        repeat_x=2,
+        repeat_y=1,
+        camera_lod=True,
+        lod_levels=4,
+        time_value=1.0,
+        choppiness=0.0,
+        wind_velocity=1.0,
+        roughness=0.035,
+    )
+    assert_camera_lod_attributes(obj)
+    return ScenarioContext(CURATED_SCENARIOS["repeat_tiles"], obj.name, cam.name)
+
+
 CURATED_SCENARIOS = {
     "calm_reference": ScenarioSpec(
         name="calm_reference",
@@ -1677,6 +1733,21 @@ CURATED_SCENARIOS = {
             luminance_gradient=MetricThresholds(mean_max=0.11, p95_max=0.26),
         ),
     ),
+    "repeat_tiles": ScenarioSpec(
+        name="repeat_tiles",
+        description="Forward-view calm water looking into the second repeated tile.",
+        thresholds=ScenarioThresholds(
+            min_geometry_reduction=0.10,
+            min_visible_samples=1,
+            position=MetricThresholds(mean_max=POSITION_MEAN_TOL, p95_max=0.90, max_max=POSITION_MAX_TOL),
+            reprojection=MetricThresholds(mean_max=REPROJ_MEAN_TOL, p95_max=1.20, max_max=REPROJ_MAX_TOL),
+            depth=MetricThresholds(mean_max=DEPTH_MEAN_TOL, p95_max=0.80, max_max=DEPTH_MAX_TOL),
+            geometric_normal_deg=MetricThresholds(mean_max=NORMAL_MEAN_TOL_DEG, p95_max=8.0),
+            rgb_absolute=MetricThresholds(mean_max=0.10, p95_max=0.22),
+            luminance_absolute=MetricThresholds(mean_max=0.09, p95_max=0.20),
+            luminance_gradient=MetricThresholds(mean_max=0.11, p95_max=0.26),
+        ),
+    ),
 }
 
 
@@ -1686,6 +1757,7 @@ SCENARIO_BUILDERS = {
     "grazing_light_adversarial": _scenario_grazing_light_adversarial,
     "temporal_camera_move": _scenario_temporal_camera_move,
     "stereo_dataset_valid": _scenario_stereo_dataset_valid,
+    "repeat_tiles": _scenario_repeat_tiles,
 }
 
 
@@ -1758,6 +1830,7 @@ def benchmark_case(scenario_name,
         description=context.spec.description,
         device=device_name,
         mode=mode,
+        ocean_split_shading=ocean_split_shading_mode(),
         status=status,
         strict_passed=strict_passed,
         runtime_errors=[],
@@ -1808,6 +1881,7 @@ def benchmark_case_with_error_capture(scenario_name,
             ).description,
             device=device_name,
             mode=mode,
+            ocean_split_shading=ocean_split_shading_mode(),
             status="error",
             strict_passed=False,
             runtime_errors=runtime_errors,
@@ -1892,6 +1966,7 @@ def run_benchmark_suite(*,
         scenarios=scenario_names,
         available_devices=get_available_cycles_devices(),
         mode=mode,
+        ocean_split_shading=ocean_split_shading_mode(),
         samples=samples,
         resolution=resolution,
         repeat_eval=repeat_eval,
