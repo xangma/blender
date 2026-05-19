@@ -1417,6 +1417,11 @@ static_assert_align(KernelData, 16);
 
 /* Kernel data structures. */
 
+enum OceanSplitShadingMode {
+  OCEAN_SPLIT_SHADING_LEVEL0 = 0,
+  OCEAN_SPLIT_SHADING_CAMERA_BRDF = 1,
+};
+
 struct KernelObject {
   Transform tfm;
   Transform itfm;
@@ -1465,6 +1470,7 @@ struct KernelObject {
   packed_float3 ocean_split_cumulative_slope_moments[OCEAN_SPLIT_MAX_LEVELS];
   packed_float3 ocean_split_cumulative_slope_moments_pre[OCEAN_SPLIT_MAX_LEVELS];
   packed_float3 ocean_split_cumulative_slope_moments_post[OCEAN_SPLIT_MAX_LEVELS];
+  int ocean_split_shading_mode;
 
   uint visibility;
   int primitive_type;
