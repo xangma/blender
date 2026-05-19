@@ -24,12 +24,32 @@
 #include "util/murmurhash.h"
 #include "util/progress.h"
 #include "util/set.h"
+#include "util/string.h"
 #include "util/tbb.h"
 #include "util/vector.h"
 
 #include "kernel/geom/attribute.h"
 
+#include <cstdlib>
+
 CCL_NAMESPACE_BEGIN
+
+static int ocean_split_shading_mode_from_env()
+{
+  const char *value = std::getenv("BLENDER_OCEAN_SPLIT_SHADING");
+  if (value == nullptr || value[0] == '\0') {
+    return OCEAN_SPLIT_SHADING_LEVEL0;
+  }
+
+  const string mode(value);
+  if (string_iequals(mode, "brdf") || string_iequals(mode, "camera_brdf") ||
+      string_iequals(mode, "unresolved_brdf"))
+  {
+    return OCEAN_SPLIT_SHADING_CAMERA_BRDF;
+  }
+
+  return OCEAN_SPLIT_SHADING_LEVEL0;
+}
 
 /* Global state of object transform update. */
 
@@ -557,6 +577,7 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
   kobject.shadow_set_membership = ob->shadow_set_membership;
   kobject.ocean_split_level_count = 0;
   kobject.ocean_split_min_wavelength = 0.0f;
+  kobject.ocean_split_shading_mode = ocean_split_shading_mode_from_env();
   for (int level = 0; level < OCEAN_SPLIT_MAX_LEVELS; level++) {
     kobject.ocean_split_resolution_x[level] = 0;
     kobject.ocean_split_resolution_y[level] = 0;
