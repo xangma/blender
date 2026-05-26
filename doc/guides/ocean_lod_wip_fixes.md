@@ -5,13 +5,12 @@ treated as production or paper-baseline code.
 
 ## Foam and Spray Cycles Attributes
 
-- Replace per-pixel `BKE_ocean_eval_ij()` texture filling with a bulk extraction path.
-  The current loader calls into `BKE_ocean_eval_ij()` for every texel, which takes the
-  ocean mutex internally. Add a BKE helper that fills foam/spray buffers under one read
-  lock, preferably sharing one pass when both maps are needed.
-- Keep the benchmark from masking dense fallback. The supersample benchmark currently
-  skips setup assertions while building scenarios; add an explicit LOD-active check,
-  geometry-reduction check, or remove the skip for normal validation runs.
+- Done: Replace per-pixel `BKE_ocean_eval_ij()` texture filling with a bulk extraction
+  path. `BKE_ocean_foam_spray_data_get()` now fills one foam/spray texture under a
+  single ocean read lock. A possible follow-up is sharing one cached pass when both foam
+  and spray are requested.
+- Done: Keep the benchmark from masking dense fallback. The supersample benchmark now
+  requires camera LOD metadata and a real LOD geometry reduction before rendering.
 - Verify SVM and OSL parity for attribute lookup. Foam/spray attribute nodes should
   sample the same full-spectrum texture on CPU/GPU, SVM/OSL, and motion-blur pre/post
   time samples.
@@ -33,14 +32,17 @@ Acceptance checks:
 
 ## Repeated Tiles
 
-- Audit repeated-domain math against dense generated geometry. The camera LOD domain
-  must match the dense grid from `[-0.5 * domain_size, -0.5 * domain_size]` to
-  `domain_min + repeat * domain_size` for both X and Y.
-- Update camera-anchor and validation helpers for repeated domains. Any clamp that still
-  assumes `[-half_extent, half_extent]` should use repeated-domain min/max instead.
-- Expand tests beyond `repeat_x=2, repeat_y=1`. Cover `repeat_y > 1`, non-square repeat
-  counts, `size != 1`, high LOD level requests that do not divide both axes evenly, and
-  visible footprints crossing tile boundaries.
+- Done: Audit repeated-domain math against dense generated geometry for the current WIP
+  smoke coverage. The camera LOD domain now matches the dense grid from
+  `[-0.5 * domain_size, -0.5 * domain_size]` to `domain_min + repeat * domain_size`
+  for both X and Y in the exercised case.
+- Done: Update camera-anchor and validation helpers for repeated domains in the Python
+  coverage test. The camera anchor now clamps against repeated-domain min/max instead
+  of the base tile.
+- Partially done: Expand tests beyond `repeat_x=2, repeat_y=1`. Current smoke coverage
+  exercises `repeat_x=2, repeat_y=2`. Still cover non-square repeat counts, `size != 1`,
+  high LOD level requests that do not divide both axes evenly, and visible footprints
+  crossing tile boundaries.
 - Validate quadtree roots and balancing on rectangular domains. `dense_cells_x` and
   `dense_cells_y` can differ, so root selection, neighbor maps, and 2:1 balancing must
   not assume a square dense cell grid.
