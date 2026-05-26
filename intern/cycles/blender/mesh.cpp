@@ -154,17 +154,11 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   vector<float> pixels_;
 };
 
-enum class BlenderOceanFoamSprayLayer {
-  Foam,
-  Spray,
-  SprayInverse,
-};
-
 class BlenderOceanFoamSprayLoader : public ImageLoader {
  public:
   BlenderOceanFoamSprayLoader(const blender::Ocean *ocean,
                               const blender::OceanSplitRuntimeLevel &level,
-                              const BlenderOceanFoamSprayLayer layer,
+                              const blender::OceanFoamSprayDataLayer layer,
                               const float foam_coverage)
       : ocean_(ocean),
         width_(level.size_x),
@@ -208,31 +202,17 @@ class BlenderOceanFoamSprayLoader : public ImageLoader {
 
     const size_t pixel_count = size_t(width_) * size_t(height_);
     pixels_.resize(pixel_count * 4);
-    blender::Ocean *ocean = const_cast<blender::Ocean *>(ocean_);
-
-    for (int y = 0; y < height_; y++) {
-      for (int x = 0; x < width_; x++) {
-        blender::OceanResult ocr{};
-        BKE_ocean_eval_ij(ocean, &ocr, x, y);
-
-        float4 value = zero_float4();
-        if (layer_ == BlenderOceanFoamSprayLayer::Foam) {
-          const float foam = blender::BKE_ocean_jminus_to_foam(ocr.Jminus, foam_coverage_);
-          value = make_float4(foam, foam, foam, 1.0f);
-        }
-        else if (layer_ == BlenderOceanFoamSprayLayer::Spray) {
-          value = make_float4(ocr.Eplus[0], 0.0f, ocr.Eplus[2], 1.0f);
-        }
-        else {
-          value = make_float4(ocr.Eminus[0], 0.0f, ocr.Eminus[2], 1.0f);
-        }
-
-        const size_t offset = (size_t(y) * size_t(width_) + size_t(x)) * 4;
-        pixels_[offset + 0] = value.x;
-        pixels_[offset + 1] = value.y;
-        pixels_[offset + 2] = value.z;
-        pixels_[offset + 3] = value.w;
-      }
+    if (!BKE_ocean_foam_spray_data_get(ocean_,
+                                       layer_,
+                                       foam_coverage_,
+                                       width_,
+                                       height_,
+                                       pixels_.data(),
+                                       int(pixels_.size())))
+    {
+      pixels_.clear();
+      width_ = 0;
+      height_ = 0;
     }
   }
 
@@ -254,7 +234,7 @@ class BlenderOceanFoamSprayLoader : public ImageLoader {
   const blender::Ocean *ocean_;
   int width_;
   int height_;
-  BlenderOceanFoamSprayLayer layer_;
+  blender::OceanFoamSprayDataLayer layer_;
   float foam_coverage_;
   uint64_t revision_ = 0;
   vector<float> pixels_;
@@ -466,7 +446,7 @@ static bool sync_ocean_split_runtime_step_resources(
     *r_foam_image = scene->image_manager->add_image(
         make_unique<BlenderOceanFoamSprayLoader>(omd->ocean,
                                                  base_level,
-                                                 BlenderOceanFoamSprayLayer::Foam,
+                                                 blender::OCEAN_FOAM_SPRAY_DATA_FOAM,
                                                  omd->foam_coverage),
         params,
         false);
@@ -480,10 +460,10 @@ static bool sync_ocean_split_runtime_step_resources(
     params.extension = EXTENSION_REPEAT;
     params.frame = omd->time;
 
-    const BlenderOceanFoamSprayLayer layer =
+    const blender::OceanFoamSprayDataLayer layer =
         (omd->flag & blender::MOD_OCEAN_INVERT_SPRAY) != 0 ?
-            BlenderOceanFoamSprayLayer::SprayInverse :
-            BlenderOceanFoamSprayLayer::Spray;
+            blender::OCEAN_FOAM_SPRAY_DATA_SPRAY_INVERSE :
+            blender::OCEAN_FOAM_SPRAY_DATA_SPRAY;
     *r_spray_image = scene->image_manager->add_image(
         make_unique<BlenderOceanFoamSprayLoader>(
             omd->ocean, base_level, layer, omd->foam_coverage),

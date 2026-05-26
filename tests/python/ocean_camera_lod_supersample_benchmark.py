@@ -48,6 +48,30 @@ def downsample_rgb_box(rgb, source_width, source_height, target_width, target_he
     return downsampled
 
 
+def assert_camera_lod_active_for_supersample(obj):
+    lod_verts, lod_faces, _lod_unused, lod_attrs = ocean_metrics.evaluated_mesh_stats(obj)
+    dense_verts, dense_faces, _dense_unused, _dense_attrs = ocean_metrics.dense_mesh_stats(obj)
+    required_attrs = {
+        "ocean_ref_coord",
+        "ocean_geometry_normal",
+        "ocean_geometry_support_covariance",
+        "ocean_ref_uv",
+        "ocean_camera_lod_level",
+        "ocean_camera_lod_split_level",
+    }
+    missing = required_attrs.difference(lod_attrs)
+    if missing:
+        raise RuntimeError(
+            "Supersample benchmark requires active camera LOD metadata; "
+            f"missing={sorted(missing)}"
+        )
+    if dense_verts <= 0 or lod_verts >= dense_verts or lod_faces >= dense_faces:
+        raise RuntimeError(
+            "Supersample benchmark would not exercise an adaptive LOD render; "
+            f"lod={(lod_verts, lod_faces)}, dense={(dense_verts, dense_faces)}"
+        )
+
+
 def render_supersample_case(
     *,
     scenario_name,
@@ -70,6 +94,7 @@ def render_supersample_case(
 
     obj = ocean_metrics.bpy.data.objects[context.obj_name]
     mod = obj.modifiers["Ocean"]
+    assert_camera_lod_active_for_supersample(obj)
 
     case_dir = Path(outdir) / ocean_metrics.sanitize_path_component(scenario_name) / ocean_metrics.sanitize_path_component(device_name)
     case_dir.mkdir(parents=True, exist_ok=True)

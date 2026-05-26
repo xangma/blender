@@ -1630,8 +1630,8 @@ def _scenario_repeat_tiles():
     clear_scene()
     set_world_flat()
     cam = make_camera_and_light(
-        cam_location=(58.0, -28.0, 7.0),
-        cam_target=(62.0, 24.0, 0.0),
+        cam_location=(58.0, 58.0, 7.0),
+        cam_target=(62.0, 62.0, 0.0),
         lens=38.0,
         sun_rotation=(0.44, 0.0, 0.68),
         sun_energy=2.0,
@@ -1643,7 +1643,7 @@ def _scenario_repeat_tiles():
         spatial_size=64,
         size=1.0,
         repeat_x=2,
-        repeat_y=1,
+        repeat_y=2,
         camera_lod=True,
         lod_levels=4,
         time_value=1.0,

@@ -63,10 +63,13 @@ def camera_object_xy(obj, cam):
 def camera_ocean_domain_anchor_xy(obj, cam):
     x, y = camera_object_xy(obj, cam)
     mod = obj.modifiers["Ocean"]
-    half_extent = 0.5 * float(mod.size) * float(mod.spatial_size)
+    domain_size = max(float(mod.size) * float(mod.spatial_size), 1.0e-8)
+    domain_min = -0.5 * domain_size
+    domain_max_x = domain_min + max(1, int(getattr(mod, "repeat_x", 1))) * domain_size
+    domain_max_y = domain_min + max(1, int(getattr(mod, "repeat_y", 1))) * domain_size
     return (
-        max(-half_extent, min(half_extent, x)),
-        max(-half_extent, min(half_extent, y)),
+        max(domain_min, min(domain_max_x, x)),
+        max(domain_min, min(domain_max_y, y)),
     )
 
 
@@ -477,8 +480,8 @@ def assert_camera_lod_conservative_visibility_coverage():
 def assert_camera_lod_repeat_tiles_cover_visible_domain():
     clear_scene()
     cam = make_camera_and_light(
-        cam_location=(58.0, -28.0, 7.0),
-        cam_target=(62.0, 24.0, 0.0),
+        cam_location=(58.0, 58.0, 7.0),
+        cam_target=(62.0, 62.0, 0.0),
         lens=38.0,
         sun_energy=0.0,
     )
@@ -494,7 +497,7 @@ def assert_camera_lod_repeat_tiles_cover_visible_domain():
         spatial_size=64,
         size=1.0,
         repeat_x=2,
-        repeat_y=1,
+        repeat_y=2,
         camera_lod=True,
         lod_levels=4,
         time_value=1.0,
@@ -506,12 +509,17 @@ def assert_camera_lod_repeat_tiles_cover_visible_domain():
 
     mod = obj.modifiers["Ocean"]
     base_tile_max_x = 0.5 * float(mod.spatial_size)
+    base_tile_max_y = 0.5 * float(mod.spatial_size)
     report = camera_lod_visible_coverage_report(obj, cam)
     assert report["visible_sample_count"] > 0, (
         "Repeat visibility validation needs visible dense reference samples"
     )
     assert report["visible_reference_max_x"] > base_tile_max_x, (
         "Repeat visibility validation must exercise the second repeated X tile; "
+        f"report={report}"
+    )
+    assert report["visible_reference_max_y"] > base_tile_max_y, (
+        "Repeat visibility validation must exercise the second repeated Y tile; "
         f"report={report}"
     )
     assert report["lod_verts"] < report["dense_verts"], (
