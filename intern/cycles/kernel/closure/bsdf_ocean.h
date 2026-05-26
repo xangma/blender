@@ -430,6 +430,89 @@ ccl_device_inline void ocean_split_time_pair(const ccl_global KernelObject *kobj
   }
 }
 
+ccl_device_inline void ocean_split_time_pair_slots(const ccl_private ShaderData *sd,
+                                                   const int slot,
+                                                   const int pre_slot,
+                                                   const int post_slot,
+                                                   ccl_private int *r_slot0,
+                                                   ccl_private int *r_slot1,
+                                                   ccl_private float *r_t)
+{
+  *r_slot0 = slot;
+  *r_slot1 = slot;
+  *r_t = 0.0f;
+
+  if (sd->time <= 0.5f && pre_slot >= 0) {
+    *r_slot0 = pre_slot;
+    *r_slot1 = slot;
+    *r_t = clamp(sd->time * 2.0f, 0.0f, 1.0f);
+  }
+  else if (sd->time > 0.5f && post_slot >= 0) {
+    *r_slot0 = slot;
+    *r_slot1 = post_slot;
+    *r_t = clamp((sd->time - 0.5f) * 2.0f, 0.0f, 1.0f);
+  }
+}
+
+ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
+                                                   const ccl_private ShaderData *sd,
+                                                   const uint64_t attr_id,
+                                                   ccl_private float4 *r_value)
+{
+  if (!ocean_split_object_has_data(kg, sd) || attr_id == uint(ATTR_STD_NOT_FOUND) ||
+      attr_id == uint64_t(ATTR_STD_NOT_FOUND))
+  {
+    return false;
+  }
+
+  const ccl_global KernelObject *kobject = ocean_split_object_data(kg, sd);
+  int slot = -1;
+  int pre_slot = -1;
+  int post_slot = -1;
+
+  if (attr_id == kobject->ocean_foam_attribute_id) {
+    slot = kobject->ocean_foam_texture_slot;
+    pre_slot = kobject->ocean_foam_texture_slot_pre;
+    post_slot = kobject->ocean_foam_texture_slot_post;
+  }
+  else if (attr_id == kobject->ocean_spray_attribute_id) {
+    slot = kobject->ocean_spray_texture_slot;
+    pre_slot = kobject->ocean_spray_texture_slot_pre;
+    post_slot = kobject->ocean_spray_texture_slot_post;
+  }
+  else {
+    return false;
+  }
+
+  if (slot < 0) {
+    return false;
+  }
+
+  float2 ref_uv;
+  if (!ocean_split_ref_uv(kg, sd, &ref_uv)) {
+    return false;
+  }
+  const float sample_u = ref_uv.x + 0.5f / float(ocean_split_level_resolution_x(kobject, 0));
+  const float sample_v = ref_uv.y + 0.5f / float(ocean_split_level_resolution_y(kobject, 0));
+
+  int slot0, slot1;
+  float t;
+  ocean_split_time_pair_slots(sd, slot, pre_slot, post_slot, &slot0, &slot1, &t);
+  if (slot0 < 0) {
+    return false;
+  }
+
+  const float4 value0 = kernel_image_interp(kg, slot0, sample_u, sample_v);
+  if (slot1 < 0 || slot1 == slot0) {
+    *r_value = value0;
+    return true;
+  }
+
+  const float4 value1 = kernel_image_interp(kg, slot1, sample_u, sample_v);
+  *r_value = value0 + t * (value1 - value0);
+  return true;
+}
+
 ccl_device_inline float2 ocean_split_normal_sample_to_slope(const float4 sample)
 {
   const float3 normal = safe_normalize_fallback(

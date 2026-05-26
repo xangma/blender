@@ -187,6 +187,14 @@ class Mesh : public Geometry {
   float ocean_split_min_wavelength = 0.0f;
   array<float> ocean_split_cell_size_x;
   array<float> ocean_split_cell_size_z;
+  ImageHandle ocean_foam_image;
+  ImageHandle ocean_foam_image_pre;
+  ImageHandle ocean_foam_image_post;
+  ImageHandle ocean_spray_image;
+  ImageHandle ocean_spray_image_pre;
+  ImageHandle ocean_spray_image_post;
+  ustring ocean_foam_attribute;
+  ustring ocean_spray_attribute;
   bool ocean_modifier_active = false;
   bool ocean_camera_lod_active = false;
 

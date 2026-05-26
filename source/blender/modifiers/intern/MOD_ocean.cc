@@ -526,9 +526,38 @@ static void ocean_split_omitted_slope_covariance(const Span<OceanSplitMomentLeve
   copy_v3_v3(r_covariance, levels[clamped_index].omitted_slope_covariance);
 }
 
+static float ocean_base_domain_size(const OceanModifierData *omd)
+{
+  return std::max(omd->size * omd->spatial_size, 1.0e-6f);
+}
+
+static int ocean_repeat_x(const OceanModifierData *omd)
+{
+  return std::max(int(omd->repeat_x), 1);
+}
+
+static int ocean_repeat_y(const OceanModifierData *omd)
+{
+  return std::max(int(omd->repeat_y), 1);
+}
+
+static float2 ocean_repeated_domain_min(const OceanModifierData *omd)
+{
+  const float domain_size = ocean_base_domain_size(omd);
+  return float2(-0.5f * domain_size, -0.5f * domain_size);
+}
+
+static float2 ocean_repeated_domain_max(const OceanModifierData *omd)
+{
+  const float domain_size = ocean_base_domain_size(omd);
+  const float2 domain_min = ocean_repeated_domain_min(omd);
+  return float2(domain_min.x + float(ocean_repeat_x(omd)) * domain_size,
+                domain_min.y + float(ocean_repeat_y(omd)) * domain_size);
+}
+
 static float2 ocean_reference_uv_from_coord(const float2 &coord, const OceanModifierData *omd)
 {
-  const float domain_size = std::max(omd->size * omd->spatial_size, 1.0e-6f);
+  const float domain_size = ocean_base_domain_size(omd);
   return float2((coord.x / domain_size) + 0.5f, (coord.y / domain_size) + 0.5f);
 }
 
@@ -780,16 +809,17 @@ static void ocean_lod_relevant_footprint_expand(OceanLODRelevantFootprint &io_un
 
 static void ocean_lod_relevant_footprint_grow(OceanLODRelevantFootprint &io_footprint,
                                               const float amount,
-                                              const float domain_half_extent)
+                                              const float2 &domain_min,
+                                              const float2 &domain_max)
 {
   if (!io_footprint.valid || amount <= 0.0f) {
     return;
   }
 
-  io_footprint.min.x = std::max(io_footprint.min.x - amount, -domain_half_extent);
-  io_footprint.min.y = std::max(io_footprint.min.y - amount, -domain_half_extent);
-  io_footprint.max.x = std::min(io_footprint.max.x + amount, domain_half_extent);
-  io_footprint.max.y = std::min(io_footprint.max.y + amount, domain_half_extent);
+  io_footprint.min.x = std::max(io_footprint.min.x - amount, domain_min.x);
+  io_footprint.min.y = std::max(io_footprint.min.y - amount, domain_min.y);
+  io_footprint.max.x = std::min(io_footprint.max.x + amount, domain_max.x);
+  io_footprint.max.y = std::min(io_footprint.max.y + amount, domain_max.y);
 }
 
 static float ocean_camera_lod_projection_footprint_buffer(const Span<OceanSplitMomentLevel> levels)
@@ -1088,16 +1118,17 @@ static void ocean_camera_projection_clip_polygon(const OceanCameraProjection &pr
 }
 
 static bool ocean_camera_projection_visible_footprint(const OceanCameraProjection &projection,
-                                                      const float domain_half_extent,
+                                                      const float2 &domain_min,
+                                                      const float2 &domain_max,
                                                       OceanLODRelevantFootprint &r_footprint)
 {
   r_footprint = OceanLODRelevantFootprint{};
 
   Vector<float2> polygon;
-  polygon.append(float2(-domain_half_extent, -domain_half_extent));
-  polygon.append(float2(domain_half_extent, -domain_half_extent));
-  polygon.append(float2(domain_half_extent, domain_half_extent));
-  polygon.append(float2(-domain_half_extent, domain_half_extent));
+  polygon.append(domain_min);
+  polygon.append(float2(domain_max.x, domain_min.y));
+  polygon.append(domain_max);
+  polygon.append(float2(domain_min.x, domain_max.y));
 
   ocean_camera_projection_clip_polygon(
       projection, OceanCameraProjectionClipPlane::Front, polygon);
@@ -1110,17 +1141,17 @@ static bool ocean_camera_projection_visible_footprint(const OceanCameraProjectio
   ocean_camera_projection_clip_polygon(
       projection, OceanCameraProjectionClipPlane::YMax, polygon);
 
-  float2 min_coord(domain_half_extent, domain_half_extent);
-  float2 max_coord(-domain_half_extent, -domain_half_extent);
+  if (polygon.is_empty()) {
+    return false;
+  }
+
+  float2 min_coord = domain_max;
+  float2 max_coord = domain_min;
   for (const float2 &coord : polygon) {
     min_coord.x = std::min(min_coord.x, coord.x);
     min_coord.y = std::min(min_coord.y, coord.y);
     max_coord.x = std::max(max_coord.x, coord.x);
     max_coord.y = std::max(max_coord.y, coord.y);
-  }
-
-  if (polygon.is_empty()) {
-    return false;
   }
 
   r_footprint.min = min_coord;
@@ -1533,6 +1564,16 @@ static bool ocean_modifier_context_is_render(const ModifierEvalContext *ctx)
   return ctx->depsgraph != nullptr && DEG_get_mode(ctx->depsgraph) == DAG_EVAL_RENDER;
 }
 
+static bool ocean_camera_lod_uses_cycles_shading(const ModifierEvalContext *ctx)
+{
+  if (ctx == nullptr || ctx->depsgraph == nullptr) {
+    return false;
+  }
+
+  const Scene *scene = DEG_get_input_scene(ctx->depsgraph);
+  return scene != nullptr && STREQ(scene->r.engine, RE_engine_id_CYCLES);
+}
+
 static bool ocean_camera_lod_requires_dense_fallback(const ModifierEvalContext *ctx,
                                                      const OceanModifierData *omd,
                                                      const char **r_reason)
@@ -1551,9 +1592,12 @@ static bool ocean_camera_lod_requires_dense_fallback(const ModifierEvalContext *
     return true;
   }
 
-  if ((omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0) {
+  if ((omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0 &&
+      !ocean_camera_lod_uses_cycles_shading(ctx))
+  {
     if (r_reason != nullptr) {
-      *r_reason = "Camera LOD foam/spray full-spectrum sampling is not available yet; using dense geometry";
+      *r_reason =
+          "Camera LOD foam/spray full-spectrum sampling requires Cycles; using dense geometry";
     }
     return true;
   }
@@ -1576,16 +1620,6 @@ static bool ocean_camera_lod_requires_dense_fallback(const ModifierEvalContext *
   }
 
   return false;
-}
-
-static bool ocean_camera_lod_uses_cycles_shading(const ModifierEvalContext *ctx)
-{
-  if (ctx == nullptr || ctx->depsgraph == nullptr) {
-    return false;
-  }
-
-  const Scene *scene = DEG_get_input_scene(ctx->depsgraph);
-  return scene != nullptr && STREQ(scene->r.engine, RE_engine_id_CYCLES);
 }
 
 #endif /* WITH_OCEANSIM */
@@ -1736,8 +1770,10 @@ struct OceanModifierRuntimeData {
   Array<int> camera_lod_topology_levels;
   Array<float> camera_lod_topology_morph_factors;
   Array<float> camera_lod_topology_radii;
-  int dense_cells_per_side = 0;
-  float domain_half_extent = 0.0f;
+  int dense_cells_x = 0;
+  int dense_cells_y = 0;
+  float2 domain_min = float2(0.0f, 0.0f);
+  float2 domain_max = float2(0.0f, 0.0f);
 };
 
 struct GenerateOceanGeometryData {
@@ -1760,8 +1796,9 @@ struct GenerateOceanCameraLODDenseGeometryData {
   blender::MutableSpan<int> point_levels;
   blender::MutableSpan<float> point_morph_factors;
   blender::MutableSpan<float> point_radius;
-  int cells_per_side;
-  float domain_half_extent;
+  int cells_x;
+  int cells_y;
+  float2 domain_min;
   float cell_size;
   float2 center;
   int split_level_index;
@@ -1909,8 +1946,10 @@ static void ocean_modifier_runtime_free_dense_template(OceanModifierRuntimeData 
     BKE_id_free(nullptr, runtime_data.camera_lod_dense_template);
     runtime_data.camera_lod_dense_template = nullptr;
   }
-  runtime_data.dense_cells_per_side = 0;
-  runtime_data.domain_half_extent = 0.0f;
+  runtime_data.dense_cells_x = 0;
+  runtime_data.dense_cells_y = 0;
+  runtime_data.domain_min = float2(0.0f, 0.0f);
+  runtime_data.domain_max = float2(0.0f, 0.0f);
 }
 
 static void ocean_modifier_runtime_free_camera_lod_cache(OceanModifierRuntimeData &runtime_data)
@@ -2132,12 +2171,12 @@ static void generate_ocean_geometry_camera_lod_dense_verts(
 {
   GenerateOceanCameraLODDenseGeometryData *gogd =
       static_cast<GenerateOceanCameraLODDenseGeometryData *>(userdata);
-  const int stride = gogd->cells_per_side + 1;
-  const float y_coord = -gogd->domain_half_extent + (float(y) * gogd->cell_size);
+  const int stride = gogd->cells_x + 1;
+  const float y_coord = gogd->domain_min.y + (float(y) * gogd->cell_size);
 
-  for (int x = 0; x <= gogd->cells_per_side; x++) {
+  for (int x = 0; x <= gogd->cells_x; x++) {
     const int i = y * stride + x;
-    const float x_coord = -gogd->domain_half_extent + (float(x) * gogd->cell_size);
+    const float x_coord = gogd->domain_min.x + (float(x) * gogd->cell_size);
     float *co = gogd->vert_positions[i];
     co[0] = x_coord;
     co[1] = y_coord;
@@ -2164,10 +2203,10 @@ static void generate_ocean_geometry_camera_lod_dense_faces(
 {
   GenerateOceanCameraLODDenseGeometryData *gogd =
       static_cast<GenerateOceanCameraLODDenseGeometryData *>(userdata);
-  const int stride = gogd->cells_per_side + 1;
+  const int stride = gogd->cells_x + 1;
 
-  for (int x = 0; x < gogd->cells_per_side; x++) {
-    const int fi = y * gogd->cells_per_side + x;
+  for (int x = 0; x < gogd->cells_x; x++) {
+    const int fi = y * gogd->cells_x + x;
     const int vi = y * stride + x;
 
     gogd->corner_verts[fi * 4 + 0] = vi;
@@ -2199,12 +2238,14 @@ struct OceanCameraLODLeaf {
 
 struct OceanCameraLODSettings {
   int quadtree_levels = 0;
-  int dense_cells_per_side = 0;
+  int dense_cells_x = 0;
+  int dense_cells_y = 0;
   int dense_vert_budget = 0;
   int usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
   int validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
   float finest_cell_size = 0.0f;
-  float domain_half_extent = 0.0f;
+  float2 domain_min = float2(0.0f, 0.0f);
+  float2 domain_max = float2(0.0f, 0.0f);
   float full_spectrum_radius = 0.0f;
   float visible_footprint_guard = 0.0f;
   float2 center = float2(0.0f, 0.0f);
@@ -2249,17 +2290,22 @@ static bool ocean_modifier_runtime_dense_template_matches(
     const OceanModifierRuntimeData &runtime_data, const OceanCameraLODSettings &lod_settings)
 {
   return runtime_data.camera_lod_dense_template != nullptr &&
-         runtime_data.dense_cells_per_side == lod_settings.dense_cells_per_side &&
-         runtime_data.domain_half_extent == lod_settings.domain_half_extent;
+         runtime_data.dense_cells_x == lod_settings.dense_cells_x &&
+         runtime_data.dense_cells_y == lod_settings.dense_cells_y &&
+         runtime_data.domain_min.x == lod_settings.domain_min.x &&
+         runtime_data.domain_min.y == lod_settings.domain_min.y &&
+         runtime_data.domain_max.x == lod_settings.domain_max.x &&
+         runtime_data.domain_max.y == lod_settings.domain_max.y;
 }
 
 static Mesh *generate_ocean_geometry_camera_lod_dense_template(
     Mesh *mesh_orig, const OceanCameraLODSettings &lod_settings)
 {
-  const int cells_per_side = lod_settings.dense_cells_per_side;
+  const int cells_x = lod_settings.dense_cells_x;
+  const int cells_y = lod_settings.dense_cells_y;
   const int verts_num = lod_settings.dense_vert_budget;
-  const int faces_num = cells_per_side * cells_per_side;
-  const float cell_size = (2.0f * lod_settings.domain_half_extent) / float(std::max(cells_per_side, 1));
+  const int faces_num = cells_x * cells_y;
+  const float cell_size = lod_settings.finest_cell_size;
 
   Mesh *result = BKE_mesh_new_nomain(verts_num, 0, faces_num, faces_num * 4);
   BKE_mesh_copy_parameters_for_eval(result, mesh_orig);
@@ -2268,23 +2314,24 @@ static Mesh *generate_ocean_geometry_camera_lod_dense_template(
   gogd.vert_positions = result->vert_positions_for_write();
   gogd.face_offsets = result->face_offsets_for_write();
   gogd.corner_verts = result->corner_verts_for_write();
-  gogd.cells_per_side = cells_per_side;
-  gogd.domain_half_extent = lod_settings.domain_half_extent;
+  gogd.cells_x = cells_x;
+  gogd.cells_y = cells_y;
+  gogd.domain_min = lod_settings.domain_min;
   gogd.cell_size = cell_size;
   gogd.center = lod_settings.center;
   gogd.split_level_index = lod_settings.levels.first().split_level_index;
 
   TaskParallelSettings parallel_settings;
   BLI_parallel_range_settings_defaults(&parallel_settings);
-  parallel_settings.use_threading = cells_per_side >= 128;
+  parallel_settings.use_threading = std::max(cells_x, cells_y) >= 128;
 
   BLI_task_parallel_range(0,
-                          cells_per_side + 1,
+                          cells_y + 1,
                           &gogd,
                           generate_ocean_geometry_camera_lod_dense_verts,
                           &parallel_settings);
   BLI_task_parallel_range(0,
-                          cells_per_side,
+                          cells_y,
                           &gogd,
                           generate_ocean_geometry_camera_lod_dense_faces,
                           &parallel_settings);
@@ -2309,8 +2356,10 @@ static Mesh *generate_ocean_geometry_camera_lod_dense(
     ocean_modifier_runtime_free_dense_template(*runtime_data);
     runtime_data->camera_lod_dense_template = generate_ocean_geometry_camera_lod_dense_template(
         mesh_orig, lod_settings);
-    runtime_data->dense_cells_per_side = lod_settings.dense_cells_per_side;
-    runtime_data->domain_half_extent = lod_settings.domain_half_extent;
+    runtime_data->dense_cells_x = lod_settings.dense_cells_x;
+    runtime_data->dense_cells_y = lod_settings.dense_cells_y;
+    runtime_data->domain_min = lod_settings.domain_min;
+    runtime_data->domain_max = lod_settings.domain_max;
   }
 
   Mesh *result = BKE_mesh_copy_for_eval(*runtime_data->camera_lod_dense_template);
@@ -2328,9 +2377,10 @@ static void ocean_camera_lod_debug_log_settings(const OceanModifierData *omd,
   }
 
   printf(
-      "[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s center=(%.6f,%.6f) domain_half=%.6f "
+      "[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s center=(%.6f,%.6f) "
+      "domain_min=(%.6f,%.6f) domain_max=(%.6f,%.6f) "
       "finest_cell=%.6f full_spectrum_radius=%.6f visible_guard=%.6f "
-      "quadtree_levels=%d modifier_lod_levels=%d dense_cells=%d "
+      "quadtree_levels=%d modifier_lod_levels=%d dense_cells=(%d,%d) "
       "dense_budget=%d visible_footprint_valid=%s footprint_min=(%.6f,%.6f) footprint_max=(%.6f,%.6f)\n",
       settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT ? "GEOMETRY_STRICT" :
                                                                             "CAMERA_OBSERVABLE",
@@ -2338,13 +2388,17 @@ static void ocean_camera_lod_debug_log_settings(const OceanModifierData *omd,
                                                                    "GENERAL_RENDER",
       double(settings.center.x),
       double(settings.center.y),
-      double(settings.domain_half_extent),
+      double(settings.domain_min.x),
+      double(settings.domain_min.y),
+      double(settings.domain_max.x),
+      double(settings.domain_max.y),
       double(settings.finest_cell_size),
       double(settings.full_spectrum_radius),
       double(settings.visible_footprint_guard),
       settings.quadtree_levels,
       int(omd->lod_levels),
-      settings.dense_cells_per_side,
+      settings.dense_cells_x,
+      settings.dense_cells_y,
       settings.dense_vert_budget,
       settings.visible_footprint.valid ? "yes" : "no",
       double(settings.visible_footprint.min.x),
@@ -2365,14 +2419,16 @@ static void ocean_camera_lod_debug_log_settings(const OceanModifierData *omd,
   fflush(stdout);
 }
 
-static int ocean_camera_lod_clamp_level_count(const int dense_cells_per_side,
+static int ocean_camera_lod_clamp_level_count(const int dense_cells_x,
+                                              const int dense_cells_y,
                                               const int base_stride,
                                               const int requested_levels)
 {
   int level_count = 1;
   int stride = std::max(base_stride, 1);
-  while (level_count < requested_levels && (dense_cells_per_side % (stride << 1)) == 0 &&
-         (dense_cells_per_side / (stride << 1)) >= 4)
+  while (level_count < requested_levels && (dense_cells_x % (stride << 1)) == 0 &&
+         (dense_cells_y % (stride << 1)) == 0 && (dense_cells_x / (stride << 1)) >= 4 &&
+         (dense_cells_y / (stride << 1)) >= 4)
   {
     stride <<= 1;
     level_count++;
@@ -2389,28 +2445,35 @@ enum class OceanCameraLODEdge {
 
 static float ocean_camera_lod_dense_cell_size(const OceanCameraLODSettings &settings)
 {
-  return (2.0f * settings.domain_half_extent) / float(std::max(settings.dense_cells_per_side, 1));
+  return settings.finest_cell_size;
 }
 
-static float ocean_camera_lod_dense_coord(const OceanCameraLODSettings &settings,
-                                          const int dense_index)
+static float ocean_camera_lod_dense_coord_x(const OceanCameraLODSettings &settings,
+                                            const int dense_index)
 {
-  return -settings.domain_half_extent +
-         (float(dense_index) * ocean_camera_lod_dense_cell_size(settings));
+  return settings.domain_min.x + (float(dense_index) * ocean_camera_lod_dense_cell_size(settings));
+}
+
+static float ocean_camera_lod_dense_coord_y(const OceanCameraLODSettings &settings,
+                                            const int dense_index)
+{
+  return settings.domain_min.y + (float(dense_index) * ocean_camera_lod_dense_cell_size(settings));
 }
 
 static float2 ocean_camera_lod_leaf_region_min(const OceanCameraLODSettings &settings,
                                                const OceanCameraLODLeaf &leaf)
 {
   return float2(
-      ocean_camera_lod_dense_coord(settings, leaf.min_x), ocean_camera_lod_dense_coord(settings, leaf.min_y));
+      ocean_camera_lod_dense_coord_x(settings, leaf.min_x),
+      ocean_camera_lod_dense_coord_y(settings, leaf.min_y));
 }
 
 static float2 ocean_camera_lod_leaf_region_max(const OceanCameraLODSettings &settings,
                                                const OceanCameraLODLeaf &leaf)
 {
   return float2(
-      ocean_camera_lod_dense_coord(settings, leaf.max_x), ocean_camera_lod_dense_coord(settings, leaf.max_y));
+      ocean_camera_lod_dense_coord_x(settings, leaf.max_x),
+      ocean_camera_lod_dense_coord_y(settings, leaf.max_y));
 }
 
 static bool ocean_camera_lod_region_intersects_full_spectrum_anchor(
@@ -2441,10 +2504,10 @@ static bool ocean_camera_lod_region_intersects_projection_set(
   }
 
   const float safe_guard = std::max(guard, 0.0f);
-  const float2 guarded_min(std::max(region_min.x - safe_guard, -settings.domain_half_extent),
-                           std::max(region_min.y - safe_guard, -settings.domain_half_extent));
-  const float2 guarded_max(std::min(region_max.x + safe_guard, settings.domain_half_extent),
-                           std::min(region_max.y + safe_guard, settings.domain_half_extent));
+  const float2 guarded_min(std::max(region_min.x - safe_guard, settings.domain_min.x),
+                           std::max(region_min.y - safe_guard, settings.domain_min.y));
+  const float2 guarded_max(std::min(region_max.x + safe_guard, settings.domain_max.x),
+                           std::min(region_max.y + safe_guard, settings.domain_max.y));
 
   for (const OceanCameraProjection &projection : settings.projection_set.projections) {
     if (ocean_camera_projection_region_intersects(projection, guarded_min, guarded_max)) {
@@ -2908,16 +2971,17 @@ static bool ocean_camera_lod_leaf_can_split(const OceanCameraLODLeaf &leaf)
 }
 
 static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_leaves,
-                                                 const int dense_cells_per_side)
+                                                 const int dense_cells_x,
+                                                 const int dense_cells_y)
 {
   if (io_leaves.is_empty()) {
     return false;
   }
 
-  Array<int> leaf_owner_cell_map(size_t(dense_cells_per_side) * size_t(dense_cells_per_side));
+  Array<int> leaf_owner_cell_map(size_t(dense_cells_x) * size_t(dense_cells_y));
   leaf_owner_cell_map.as_mutable_span().fill(-1);
   auto dense_cell_index = [&](const int dense_x, const int dense_y) {
-    return size_t(dense_y) * size_t(dense_cells_per_side) + size_t(dense_x);
+    return size_t(dense_y) * size_t(dense_cells_x) + size_t(dense_x);
   };
 
   for (const int leaf_index : io_leaves.index_range()) {
@@ -2947,7 +3011,7 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
 
     if (horizontal) {
       const int neighbor_y = (edge == OceanCameraLODEdge::South) ? leaf.min_y - 1 : leaf.max_y;
-      if (neighbor_y < 0 || neighbor_y >= dense_cells_per_side) {
+      if (neighbor_y < 0 || neighbor_y >= dense_cells_y) {
         return false;
       }
       int x = leaf.min_x;
@@ -2968,7 +3032,7 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
     }
 
     const int neighbor_x = (edge == OceanCameraLODEdge::West) ? leaf.min_x - 1 : leaf.max_x;
-    if (neighbor_x < 0 || neighbor_x >= dense_cells_per_side) {
+    if (neighbor_x < 0 || neighbor_x >= dense_cells_x) {
       return false;
     }
     int y = leaf.min_y;
@@ -3023,10 +3087,11 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
 }
 
 static void ocean_camera_lod_balance_leaves(Vector<OceanCameraLODLeaf> &io_leaves,
-                                            const int dense_cells_per_side)
+                                            const int dense_cells_x,
+                                            const int dense_cells_y)
 {
   for (int pass = 0; pass < 32; pass++) {
-    if (!ocean_camera_lod_balance_leaves_once(io_leaves, dense_cells_per_side)) {
+    if (!ocean_camera_lod_balance_leaves_once(io_leaves, dense_cells_x, dense_cells_y)) {
       return;
     }
   }
@@ -3052,30 +3117,33 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
   const int root_stride = coarsest_level.stride;
   const float dense_cell_size = ocean_camera_lod_dense_cell_size(settings);
   const float root_cell_size = dense_cell_size * float(root_stride);
-  const float domain_min = -settings.domain_half_extent;
-  const float domain_max = settings.domain_half_extent;
-  const float region_min_x = domain_min;
-  const float region_max_x = domain_max;
-  const float region_min_y = domain_min;
-  const float region_max_y = domain_max;
+  const float region_min_x = settings.domain_min.x;
+  const float region_max_x = settings.domain_max.x;
+  const float region_min_y = settings.domain_min.y;
+  const float region_max_y = settings.domain_max.y;
 
-  auto root_index_min = [&](const float coord) {
+  auto root_index_min = [&](const float coord, const float domain_min, const int dense_cells) {
     return std::clamp(
         int(floorf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
         0,
-        std::max(settings.dense_cells_per_side - root_stride, 0));
+        std::max(dense_cells - root_stride, 0));
   };
-  auto root_index_max = [&](const float coord, const int min_index) {
+  auto root_index_max = [&](const float coord,
+                            const float domain_min,
+                            const int dense_cells,
+                            const int min_index) {
     return std::clamp(
         int(ceilf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
         min_index + root_stride,
-        settings.dense_cells_per_side);
+        dense_cells);
   };
 
-  const int min_x = root_index_min(region_min_x);
-  const int max_x = root_index_max(region_max_x, min_x);
-  const int min_y = root_index_min(region_min_y);
-  const int max_y = root_index_max(region_max_y, min_y);
+  const int min_x = root_index_min(region_min_x, settings.domain_min.x, settings.dense_cells_x);
+  const int max_x = root_index_max(
+      region_max_x, settings.domain_min.x, settings.dense_cells_x, min_x);
+  const int min_y = root_index_min(region_min_y, settings.domain_min.y, settings.dense_cells_y);
+  const int max_y = root_index_max(
+      region_max_y, settings.domain_min.y, settings.dense_cells_y, min_y);
 
   Vector<OceanCameraLODLeaf> pending;
   for (int x = min_x; x < max_x; x += root_stride) {
@@ -3086,9 +3154,9 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       root.stride = coarsest_level.stride;
       root.cell_size = coarsest_level.cell_size;
       root.min_x = x;
-      root.max_x = std::min(x + root_stride, settings.dense_cells_per_side);
+      root.max_x = std::min(x + root_stride, settings.dense_cells_x);
       root.min_y = y;
-      root.max_y = std::min(y + root_stride, settings.dense_cells_per_side);
+      root.max_y = std::min(y + root_stride, settings.dense_cells_y);
       pending.append(root);
     }
   }
@@ -3178,7 +3246,7 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
   }
 
   const double balance_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-  ocean_camera_lod_balance_leaves(r_leaves, settings.dense_cells_per_side);
+  ocean_camera_lod_balance_leaves(r_leaves, settings.dense_cells_x, settings.dense_cells_y);
   if (profile_enabled) {
     balance_s = BLI_time_now_seconds() - balance_start;
     ocean_camera_lod_profile_logf("<settings>",
@@ -3189,7 +3257,7 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
                                   select_s,
                                   balance_s,
                                   int(r_leaves.size()),
-                                  settings.dense_cells_per_side);
+                                  std::max(settings.dense_cells_x, settings.dense_cells_y));
   }
 }
 
@@ -3224,10 +3292,13 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   const Vector<OceanSplitMomentLevel> moment_levels = ocean_split_moment_levels(omd, read_scope_ptr);
   const int available_levels = std::max(1, int(moment_levels.size()));
   const int requested_quadtree_levels = std::clamp(int(omd->lod_levels), 1, available_levels);
-  const int dense_cells_per_side = std::max(resolution * resolution, 4);
-  const float domain_size = omd->size * omd->spatial_size;
-  const float domain_half_extent = 0.5f * domain_size;
-  const float dense_cell_size = domain_size / float(dense_cells_per_side);
+  const int base_tile_cells = std::max(resolution * resolution, 4);
+  const int dense_cells_x = base_tile_cells * ocean_repeat_x(omd);
+  const int dense_cells_y = base_tile_cells * ocean_repeat_y(omd);
+  const float domain_size = ocean_base_domain_size(omd);
+  const float2 domain_min = ocean_repeated_domain_min(omd);
+  const float2 domain_max = ocean_repeated_domain_max(omd);
+  const float dense_cell_size = domain_size / float(base_tile_cells);
 
   const float min_wavelength = std::max(BKE_ocean_split_min_wavelength_get(omd->ocean), 1.0e-6f);
   settings.validation_mode = (settings.usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) ?
@@ -3236,9 +3307,11 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   settings.tolerances = ocean_camera_lod_tolerances(min_wavelength);
   settings.tolerances.reprojection_px = std::max(omd->lod_pixel_error, 1.0e-4f);
 
-  settings.dense_cells_per_side = dense_cells_per_side;
-  settings.dense_vert_budget = (dense_cells_per_side + 1) * (dense_cells_per_side + 1);
-  settings.domain_half_extent = domain_half_extent;
+  settings.dense_cells_x = dense_cells_x;
+  settings.dense_cells_y = dense_cells_y;
+  settings.dense_vert_budget = (dense_cells_x + 1) * (dense_cells_y + 1);
+  settings.domain_min = domain_min;
+  settings.domain_max = domain_max;
   settings.full_spectrum_radius = (omd->lod_camera_full_spectrum_radius > 0.0f) ?
                                       omd->lod_camera_full_spectrum_radius :
                                       (2.0f * dense_cell_size);
@@ -3264,13 +3337,13 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
         scene, ctx->object, camera, settings.usage_mode);
     for (const OceanCameraProjection &projection : settings.projection_set.projections) {
       OceanLODRelevantFootprint footprint;
-      if (ocean_camera_projection_visible_footprint(projection, domain_half_extent, footprint)) {
+      if (ocean_camera_projection_visible_footprint(projection, domain_min, domain_max, footprint)) {
         ocean_lod_relevant_footprint_expand(settings.visible_footprint, footprint);
       }
     }
     settings.visible_footprint_guard = ocean_camera_lod_projection_footprint_buffer(moment_levels);
     ocean_lod_relevant_footprint_grow(
-        settings.visible_footprint, settings.visible_footprint_guard, domain_half_extent);
+        settings.visible_footprint, settings.visible_footprint_guard, domain_min, domain_max);
     settings.projection_set.visible_footprint = settings.visible_footprint;
   }
   if (profile_enabled) {
@@ -3292,7 +3365,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   }
 
   settings.quadtree_levels = ocean_camera_lod_clamp_level_count(
-      dense_cells_per_side, 1, requested_quadtree_levels);
+      dense_cells_x, dense_cells_y, 1, requested_quadtree_levels);
 
   settings.finest_cell_size = dense_cell_size;
   settings.full_domain_dense = settings.quadtree_levels == 1;
@@ -3309,7 +3382,10 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   if (!settings.full_domain_dense && settings.visible_footprint.valid && !settings.levels.is_empty()) {
     settings.visible_footprint_guard += settings.levels.last().cell_size;
     ocean_lod_relevant_footprint_grow(
-        settings.visible_footprint, settings.levels.last().cell_size, settings.domain_half_extent);
+        settings.visible_footprint,
+        settings.levels.last().cell_size,
+        settings.domain_min,
+        settings.domain_max);
     settings.projection_set.visible_footprint = settings.visible_footprint;
   }
 
@@ -3406,10 +3482,9 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   const double settings_s = 0.0;
   const int quadtree_levels = lod_settings.quadtree_levels;
   const float2 center = lod_settings.center;
-  const float domain_half_extent = lod_settings.domain_half_extent;
-  const int dense_cells_per_side = lod_settings.dense_cells_per_side;
-  const float dense_cell_size = (2.0f * domain_half_extent) /
-                                float(std::max(dense_cells_per_side, 1));
+  const int dense_cells_x = lod_settings.dense_cells_x;
+  const int dense_cells_y = lod_settings.dense_cells_y;
+  const float dense_cell_size = ocean_camera_lod_dense_cell_size(lod_settings);
 
   Vector<float3> positions;
   Vector<int> face_offsets;
@@ -3428,30 +3503,30 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
   face_leaf_split_levels.reserve(lod_settings.leaves.size());
   face_cell_sizes.reserve(lod_settings.leaves.size());
   Array<int> level_face_counts(quadtree_levels, 0);
-  Array<int> dense_vertex_map(size_t(dense_cells_per_side + 1) * size_t(dense_cells_per_side + 1));
+  Array<int> dense_vertex_map(size_t(dense_cells_x + 1) * size_t(dense_cells_y + 1));
   dense_vertex_map.as_mutable_span().fill(-1);
-  Array<int> leaf_owner_cell_map(size_t(dense_cells_per_side) * size_t(dense_cells_per_side));
+  Array<int> leaf_owner_cell_map(size_t(dense_cells_x) * size_t(dense_cells_y));
   leaf_owner_cell_map.as_mutable_span().fill(-1);
 
   auto dense_coord = [&](const int dense_x, const int dense_y) {
-    return float2(-domain_half_extent + (float(dense_x) * dense_cell_size),
-                  -domain_half_extent + (float(dense_y) * dense_cell_size));
+    return float2(lod_settings.domain_min.x + (float(dense_x) * dense_cell_size),
+                  lod_settings.domain_min.y + (float(dense_y) * dense_cell_size));
   };
 
   auto dense_index = [&](const int dense_x, const int dense_y) {
-    return size_t(dense_y) * size_t(dense_cells_per_side + 1) + size_t(dense_x);
+    return size_t(dense_y) * size_t(dense_cells_x + 1) + size_t(dense_x);
   };
 
   auto dense_cell_index = [&](const int dense_x, const int dense_y) {
-    return size_t(dense_y) * size_t(dense_cells_per_side) + size_t(dense_x);
+    return size_t(dense_y) * size_t(dense_cells_x) + size_t(dense_x);
   };
 
   auto ensure_vertex = [&](const int dense_x,
                            const int dense_y,
                            const int level_index,
                            const float morph_factor) {
-    BLI_assert(dense_x >= 0 && dense_x <= dense_cells_per_side);
-    BLI_assert(dense_y >= 0 && dense_y <= dense_cells_per_side);
+    BLI_assert(dense_x >= 0 && dense_x <= dense_cells_x);
+    BLI_assert(dense_y >= 0 && dense_y <= dense_cells_y);
     const size_t key = dense_index(dense_x, dense_y);
     int vertex_index = dense_vertex_map[key];
     const float2 coord = dense_coord(dense_x, dense_y);
@@ -3567,7 +3642,7 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
 
     if (horizontal) {
       const int neighbor_y = (edge == OceanCameraLODEdge::South) ? leaf.min_y - 1 : leaf.max_y;
-      if (neighbor_y >= 0 && neighbor_y < dense_cells_per_side) {
+      if (neighbor_y >= 0 && neighbor_y < dense_cells_y) {
         int x = leaf.min_x;
         while (x < leaf.max_x) {
           const int other_index = leaf_owner_cell_map[dense_cell_index(x, neighbor_y)];
@@ -3584,7 +3659,7 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
     }
     else {
       const int neighbor_x = (edge == OceanCameraLODEdge::West) ? leaf.min_x - 1 : leaf.max_x;
-      if (neighbor_x >= 0 && neighbor_x < dense_cells_per_side) {
+      if (neighbor_x >= 0 && neighbor_x < dense_cells_x) {
         int y = leaf.min_y;
         while (y < leaf.max_y) {
           const int other_index = leaf_owner_cell_map[dense_cell_index(neighbor_x, y)];

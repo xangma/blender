@@ -99,6 +99,7 @@ def assert_ocean_camera_lod_metrics_module_contract():
         "grazing_light_adversarial",
         "temporal_camera_move",
         "stereo_dataset_valid",
+        "repeat_tiles",
     }
     assert required_scenarios.issubset(set(ocean_metrics.CURATED_SCENARIOS)), (
         "Shared ocean camera LOD metrics module must publish the curated benchmark scenarios"
@@ -473,6 +474,55 @@ def assert_camera_lod_conservative_visibility_coverage():
     )
 
 
+def assert_camera_lod_repeat_tiles_cover_visible_domain():
+    clear_scene()
+    cam = make_camera_and_light(
+        cam_location=(58.0, -28.0, 7.0),
+        cam_target=(62.0, 24.0, 0.0),
+        lens=38.0,
+        sun_energy=0.0,
+    )
+    bpy.context.scene.render.resolution_x = 256
+    bpy.context.scene.render.resolution_y = 128
+    cam.data.clip_start = 0.1
+    cam.data.clip_end = 20000.0
+
+    obj = make_ocean_object(
+        name="OceanRepeatVisibilityLOD",
+        geometry_mode="GENERATE",
+        resolution=6,
+        spatial_size=64,
+        size=1.0,
+        repeat_x=2,
+        repeat_y=1,
+        camera_lod=True,
+        lod_levels=4,
+        time_value=1.0,
+        choppiness=0.0,
+        wind_velocity=1.0,
+        roughness=0.02,
+    )
+    assert_camera_lod_attributes(obj)
+
+    mod = obj.modifiers["Ocean"]
+    base_tile_max_x = 0.5 * float(mod.spatial_size)
+    report = camera_lod_visible_coverage_report(obj, cam)
+    assert report["visible_sample_count"] > 0, (
+        "Repeat visibility validation needs visible dense reference samples"
+    )
+    assert report["visible_reference_max_x"] > base_tile_max_x, (
+        "Repeat visibility validation must exercise the second repeated X tile; "
+        f"report={report}"
+    )
+    assert report["lod_verts"] < report["dense_verts"], (
+        "Repeated-domain camera LOD should remain adaptive rather than falling back to dense"
+    )
+    assert report["missing_visible_sample_count"] == 0, (
+        "Repeated-domain camera LOD must cover visible dense samples outside the base tile; "
+        f"report={report}"
+    )
+
+
 def assert_camera_lod_budget_invariant():
     scenarios = (
         ((0.0, -35.0, 8.0), (0.0, 0.0, 0.0), 50.0),
@@ -582,41 +632,67 @@ def assert_stereo_dataset_reference_validation():
     assert report["max_geometric_normal_error_deg"] < NORMAL_MAX_TOL_DEG
 
 
-def assert_camera_lod_foam_falls_back_to_dense_geometry():
+def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
     clear_scene()
     make_camera_and_light(
-        cam_location=(0.0, -30.0, 7.0),
-        cam_target=(0.0, 0.0, 0.0),
-        lens=45.0,
+        cam_location=(0.0, -58.0, 3.0),
+        cam_target=(0.0, 180.0, 0.0),
+        lens=55.0,
         sun_energy=0.0,
     )
     obj = make_ocean_object(
-        name="OceanCameraLODFoamFallback",
+        name="OceanCameraLODFoamSpray",
         geometry_mode="GENERATE",
-        resolution=5,
-        spatial_size=48,
+        resolution=6,
+        spatial_size=128,
         size=1.0,
         camera_lod=True,
-        lod_levels=4,
-        time_value=0.75,
-        choppiness=1.0,
-        wind_velocity=12.0,
+        lod_levels=5,
+        lod_validation_mode="CAMERA_OBSERVABLE",
+        time_value=1.0,
+        choppiness=1.3,
+        wind_velocity=18.0,
+        roughness=0.02,
     )
     mod = obj.modifiers["Ocean"]
     mod.use_foam = True
     mod.foam_layer_name = "foam"
+    mod.use_spray = True
+    mod.spray_layer_name = "spray"
+    bpy.context.view_layer.update()
+    assert_camera_lod_attributes(obj)
 
     lod_verts, lod_faces, lod_unused, lod_attrs = evaluated_mesh_stats(obj)
     dense_verts, dense_faces, dense_unused, _dense_attrs = dense_mesh_stats(obj)
 
-    assert "ocean_camera_lod_level" not in lod_attrs, (
-        "Foam/spray currently needs full-spectrum sampling; until that exists camera LOD should "
-        "fall back to dense geometry instead of interpolating foam from coarse vertices"
+    assert "ocean_camera_lod_level" in lod_attrs, (
+        "Cycles foam/spray camera LOD should keep adaptive geometry; full-spectrum foam/spray "
+        "is sampled by the shader instead of requiring dense geometry"
     )
-    assert (lod_verts, lod_faces, lod_unused) == (dense_verts, dense_faces, dense_unused), (
-        "Foam-enabled camera LOD fallback should produce dense-equivalent topology; "
+    assert {"foam", "spray"}.issubset(lod_attrs), "Foam/spray layer names should still be exported"
+    assert lod_verts < dense_verts and lod_faces < dense_faces, (
+        "Foam/spray camera LOD should remain adaptive; "
         f"lod={(lod_verts, lod_faces, lod_unused)}, dense={(dense_verts, dense_faces, dense_unused)}"
     )
+
+    mat = obj.data.materials[0]
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    for node in list(nodes):
+        if node.name != "Material Output":
+            nodes.remove(node)
+    output = nodes["Material Output"]
+    attr = nodes.new("ShaderNodeAttribute")
+    attr.attribute_name = "foam"
+    emission = nodes.new("ShaderNodeEmission")
+    emission.inputs["Strength"].default_value = 1.0
+    links.new(attr.outputs["Color"], emission.inputs["Color"])
+    links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+    report = render_rgb_difference_report(obj, samples=4, resolution=64)
+    assert report["mean_absolute_error"] < RGB_MAE_TOL, report
+    assert report["p95_absolute_error"] < 0.30, report
+    assert report["max_absolute_error"] < 0.50, report
 
 
 def assert_stereo_dataset_wide_footprint_uses_multiple_levels():
@@ -891,7 +967,8 @@ def main():
     assert_camera_lod_strict_mode_adversarial_validation()
     assert_camera_lod_general_render_validates_relevant_leaf_error()
     assert_camera_lod_conservative_visibility_coverage()
-    assert_camera_lod_foam_falls_back_to_dense_geometry()
+    assert_camera_lod_repeat_tiles_cover_visible_domain()
+    assert_camera_lod_foam_and_spray_use_camera_lod_geometry()
     assert_stereo_dataset_reference_validation()
     assert_stereo_dataset_wide_footprint_uses_multiple_levels()
     assert_stereo_dataset_wide_footprint_finest_patch_tracks_camera_anchor()

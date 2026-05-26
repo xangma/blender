@@ -154,6 +154,112 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   vector<float> pixels_;
 };
 
+enum class BlenderOceanFoamSprayLayer {
+  Foam,
+  Spray,
+  SprayInverse,
+};
+
+class BlenderOceanFoamSprayLoader : public ImageLoader {
+ public:
+  BlenderOceanFoamSprayLoader(const blender::Ocean *ocean,
+                              const blender::OceanSplitRuntimeLevel &level,
+                              const BlenderOceanFoamSprayLayer layer,
+                              const float foam_coverage)
+      : ocean_(ocean),
+        width_(level.size_x),
+        height_(level.size_y),
+        layer_(layer),
+        foam_coverage_(foam_coverage),
+        revision_(BKE_ocean_split_runtime_revision_get(ocean))
+  {
+  }
+
+  bool load_metadata(ImageMetaData &metadata) override
+  {
+    metadata.type = IMAGE_DATA_TYPE_FLOAT4;
+    metadata.channels = 4;
+    metadata.width = width_;
+    metadata.height = height_;
+    return true;
+  }
+
+  bool load_pixels(const ImageMetaData &metadata, void *pixels) override
+  {
+    if (pixels_.empty()) {
+      prepare_for_storage();
+    }
+
+    const size_t expected_elements = size_t(width_) * size_t(height_) * 4;
+    if (metadata.width != width_ || metadata.height != height_ || pixels_.size() != expected_elements)
+    {
+      return false;
+    }
+
+    memcpy(pixels, pixels_.data(), pixels_.size() * sizeof(float));
+    return true;
+  }
+
+  void prepare_for_storage() override
+  {
+    if (!pixels_.empty() || ocean_ == nullptr || width_ <= 0 || height_ <= 0) {
+      return;
+    }
+
+    const size_t pixel_count = size_t(width_) * size_t(height_);
+    pixels_.resize(pixel_count * 4);
+    blender::Ocean *ocean = const_cast<blender::Ocean *>(ocean_);
+
+    for (int y = 0; y < height_; y++) {
+      for (int x = 0; x < width_; x++) {
+        blender::OceanResult ocr{};
+        BKE_ocean_eval_ij(ocean, &ocr, x, y);
+
+        float4 value = zero_float4();
+        if (layer_ == BlenderOceanFoamSprayLayer::Foam) {
+          const float foam = blender::BKE_ocean_jminus_to_foam(ocr.Jminus, foam_coverage_);
+          value = make_float4(foam, foam, foam, 1.0f);
+        }
+        else if (layer_ == BlenderOceanFoamSprayLayer::Spray) {
+          value = make_float4(ocr.Eplus[0], 0.0f, ocr.Eplus[2], 1.0f);
+        }
+        else {
+          value = make_float4(ocr.Eminus[0], 0.0f, ocr.Eminus[2], 1.0f);
+        }
+
+        const size_t offset = (size_t(y) * size_t(width_) + size_t(x)) * 4;
+        pixels_[offset + 0] = value.x;
+        pixels_[offset + 1] = value.y;
+        pixels_[offset + 2] = value.z;
+        pixels_[offset + 3] = value.w;
+      }
+    }
+  }
+
+  string name() const override
+  {
+    return "ocean_foam_spray";
+  }
+
+  bool equals(const ImageLoader &other) const override
+  {
+    const BlenderOceanFoamSprayLoader &other_loader =
+        static_cast<const BlenderOceanFoamSprayLoader &>(other);
+    return ocean_ == other_loader.ocean_ && width_ == other_loader.width_ &&
+           height_ == other_loader.height_ && layer_ == other_loader.layer_ &&
+           foam_coverage_ == other_loader.foam_coverage_ && revision_ == other_loader.revision_;
+  }
+
+ private:
+  const blender::Ocean *ocean_;
+  int width_;
+  int height_;
+  BlenderOceanFoamSprayLayer layer_;
+  float foam_coverage_;
+  uint64_t revision_ = 0;
+  vector<float> pixels_;
+};
+
 static const blender::OceanModifierData *blender_object_ocean_split_modifier(
     const BObjectInfo &b_ob_info)
 {
@@ -198,7 +304,9 @@ static bool sync_ocean_split_runtime_step_resources(
     array<int> *r_resolution_y,
     float *r_min_wavelength,
     array<float> *r_cell_size_x,
-    array<float> *r_cell_size_z)
+    array<float> *r_cell_size_z,
+    ImageHandle *r_foam_image,
+    ImageHandle *r_spray_image)
 {
   if (omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
     if (r_slope_images != nullptr) {
@@ -218,6 +326,12 @@ static bool sync_ocean_split_runtime_step_resources(
     }
     if (r_cell_size_z != nullptr) {
       r_cell_size_z->clear();
+    }
+    if (r_foam_image != nullptr) {
+      r_foam_image->clear();
+    }
+    if (r_spray_image != nullptr) {
+      r_spray_image->clear();
     }
     return false;
   }
@@ -243,6 +357,12 @@ static bool sync_ocean_split_runtime_step_resources(
     if (r_cell_size_z != nullptr) {
       r_cell_size_z->clear();
     }
+    if (r_foam_image != nullptr) {
+      r_foam_image->clear();
+    }
+    if (r_spray_image != nullptr) {
+      r_spray_image->clear();
+    }
     return false;
   }
 
@@ -267,6 +387,12 @@ static bool sync_ocean_split_runtime_step_resources(
   if (r_cell_size_z != nullptr) {
     r_cell_size_z->resize(level_count);
   }
+  if (r_foam_image != nullptr) {
+    r_foam_image->clear();
+  }
+  if (r_spray_image != nullptr) {
+    r_spray_image->clear();
+  }
 
   for (int level_index = 0; level_index < level_count; level_index++) {
     blender::OceanSplitRuntimeLevel level;
@@ -288,6 +414,12 @@ static bool sync_ocean_split_runtime_step_resources(
       }
       if (r_cell_size_z != nullptr) {
         r_cell_size_z->resize(level_index);
+      }
+      if (r_foam_image != nullptr) {
+        r_foam_image->clear();
+      }
+      if (r_spray_image != nullptr) {
+        r_spray_image->clear();
       }
       return false;
     }
@@ -321,6 +453,44 @@ static bool sync_ocean_split_runtime_step_resources(
     }
   }
 
+  blender::OceanSplitRuntimeLevel base_level;
+  const bool have_base_level = BKE_ocean_split_runtime_level_get(omd->ocean, 0, &base_level);
+  if (have_base_level && r_foam_image != nullptr &&
+      (omd->flag & blender::MOD_OCEAN_GENERATE_FOAM) != 0)
+  {
+    ImageParams params;
+    params.interpolation = INTERPOLATION_LINEAR;
+    params.extension = EXTENSION_REPEAT;
+    params.frame = omd->time;
+
+    *r_foam_image = scene->image_manager->add_image(
+        make_unique<BlenderOceanFoamSprayLoader>(omd->ocean,
+                                                 base_level,
+                                                 BlenderOceanFoamSprayLayer::Foam,
+                                                 omd->foam_coverage),
+        params,
+        false);
+  }
+
+  if (have_base_level && r_spray_image != nullptr &&
+      (omd->flag & blender::MOD_OCEAN_GENERATE_SPRAY) != 0)
+  {
+    ImageParams params;
+    params.interpolation = INTERPOLATION_LINEAR;
+    params.extension = EXTENSION_REPEAT;
+    params.frame = omd->time;
+
+    const BlenderOceanFoamSprayLayer layer =
+        (omd->flag & blender::MOD_OCEAN_INVERT_SPRAY) != 0 ?
+            BlenderOceanFoamSprayLayer::SprayInverse :
+            BlenderOceanFoamSprayLayer::Spray;
+    *r_spray_image = scene->image_manager->add_image(
+        make_unique<BlenderOceanFoamSprayLoader>(
+            omd->ocean, base_level, layer, omd->foam_coverage),
+        params,
+        false);
+  }
+
   return true;
 }
 
@@ -335,6 +505,14 @@ static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_inf
   mesh->ocean_split_resolution_y.clear();
   mesh->ocean_split_cell_size_x.clear();
   mesh->ocean_split_cell_size_z.clear();
+  mesh->ocean_foam_image.clear();
+  mesh->ocean_foam_image_pre.clear();
+  mesh->ocean_foam_image_post.clear();
+  mesh->ocean_spray_image.clear();
+  mesh->ocean_spray_image_pre.clear();
+  mesh->ocean_spray_image_post.clear();
+  mesh->ocean_foam_attribute = ustring();
+  mesh->ocean_spray_attribute = ustring();
   if (!omd) {
     return;
   }
@@ -352,7 +530,16 @@ static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_inf
       &mesh->ocean_split_resolution_y,
       &mesh->ocean_split_min_wavelength,
       &mesh->ocean_split_cell_size_x,
-      &mesh->ocean_split_cell_size_z);
+      &mesh->ocean_split_cell_size_z,
+      &mesh->ocean_foam_image,
+      &mesh->ocean_spray_image);
+
+  if ((omd->flag & blender::MOD_OCEAN_GENERATE_FOAM) != 0 && !mesh->ocean_foam_image.empty()) {
+    mesh->ocean_foam_attribute = ustring(omd->foamlayername);
+  }
+  if ((omd->flag & blender::MOD_OCEAN_GENERATE_SPRAY) != 0 && !mesh->ocean_spray_image.empty()) {
+    mesh->ocean_spray_attribute = ustring(omd->spraylayername);
+  }
 }
 
 static void attr_create_motion_from_velocity(Mesh *mesh,
@@ -1565,7 +1752,9 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
                                                 nullptr,
                                                 nullptr,
                                                 nullptr,
-                                                nullptr);
+                                                nullptr,
+                                                &mesh->ocean_foam_image_pre,
+                                                &mesh->ocean_spray_image_pre);
       }
       if (motion_step == mesh->get_motion_steps() - 2) {
         sync_ocean_split_runtime_step_resources(scene,
@@ -1576,7 +1765,9 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
                                                 nullptr,
                                                 nullptr,
                                                 nullptr,
-                                                nullptr);
+                                                nullptr,
+                                                &mesh->ocean_foam_image_post,
+                                                &mesh->ocean_spray_image_post);
       }
     }
   }
