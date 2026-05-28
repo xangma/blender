@@ -5,6 +5,10 @@
  *
  * Adapted code from Open Shading Language. */
 
+#include "kernel/camera/camera.h"
+
+#include "kernel/closure/bsdf_ocean.h"
+
 #include "kernel/geom/attribute.h"
 
 #include "kernel/util/ies.h"
@@ -269,6 +273,13 @@ ccl_device_extern bool osl_get_attribute(ccl_private ShaderGlobals *sg,
   }
 
   const int object = sd->object;
+
+  if (object == sd->object) {
+    float4 ocean_attr;
+    if (ocean_split_attribute_value(kg, sd, uint64_t(name), &ocean_attr)) {
+      return set_attribute(ocean_attr, type, derivatives, res);
+    }
+  }
 
   const AttributeDescriptor desc = find_attribute(kg, object, sd->prim, name);
   if (is_attribute_found(desc)) {

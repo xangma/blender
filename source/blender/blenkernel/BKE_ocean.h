@@ -95,6 +95,12 @@ struct OceanSplitRuntimeReadScope {
   const struct Ocean *ocean;
 };
 
+enum OceanFoamSprayDataLayer {
+  OCEAN_FOAM_SPRAY_DATA_FOAM = 0,
+  OCEAN_FOAM_SPRAY_DATA_SPRAY = 1,
+  OCEAN_FOAM_SPRAY_DATA_SPRAY_INVERSE = 2,
+};
+
 struct OceanCache {
   struct ImBuf **ibufs_disp;
   struct ImBuf **ibufs_foam;
@@ -236,6 +242,13 @@ bool BKE_ocean_split_runtime_level_normal_data_get(const struct Ocean *oc,
                                                    int level_index,
                                                    float *r_normal_data,
                                                    int normal_data_len);
+bool BKE_ocean_foam_spray_data_get(const struct Ocean *oc,
+                                   enum OceanFoamSprayDataLayer layer,
+                                   float foam_coverage,
+                                   int width,
+                                   int height,
+                                   float *r_data,
+                                   int data_len);
 /**
  * Note that this doesn't wrap properly for i, j < 0, but its not really meant for that being
  * just a way to get the raw data out to save in some image format.

@@ -6,6 +6,8 @@
 
 #include "kernel/globals.h"
 
+#include "kernel/closure/bsdf_ocean.h"
+
 #include "kernel/geom/attribute.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/primitive.h"
@@ -88,6 +90,18 @@ svm_node_attr_surface_eval(KernelGlobals kg,
   if (node.attr == ATTR_STD_GENERATED && !is_attribute_found(desc)) {
     Float3Type f = shading_position<Float3Type>(sd);
     object_inverse_position_transform_if_object(kg, sd, &f);
+    return f;
+  }
+
+  float4 ocean_attr;
+  if (ocean_split_attribute_value(kg, sd, uint64_t(node.attr), &ocean_attr)) {
+    Float3Type f(make_float3(ocean_attr));
+    if (type == NODE_ATTR_OUTPUT_FLOAT) {
+      return make_float3(average(f));
+    }
+    if (type == NODE_ATTR_OUTPUT_FLOAT_ALPHA) {
+      return make_float3(FloatType(ocean_attr.w));
+    }
     return f;
   }
 

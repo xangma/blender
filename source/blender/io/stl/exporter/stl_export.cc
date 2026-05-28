@@ -22,6 +22,7 @@
 
 #include "DNA_layer_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "ED_util.hh"
@@ -31,6 +32,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 
+#include "IO_ocean_lod_disabler.hh"
 #include "IO_stl.hh"
 
 #include "stl_data.hh"
@@ -189,6 +191,13 @@ void exporter_main(const bContext *C, const STLExportParams &export_params)
     DEG_graph_build_from_view_layer(depsgraph);
   }
   BKE_scene_graph_update_tagged(depsgraph, bmain);
+
+  OceanCameraLODDisabler ocean_camera_lod_disabler(depsgraph);
+  if (export_params.apply_modifiers) {
+    ocean_camera_lod_disabler.disable_modifiers([&](const Object &object) {
+      return !export_params.export_selected_objects || (object.base_flag & BASE_SELECTED);
+    });
+  }
 
   float scene_unit_scale = 1.0f;
   if ((scene->unit.system != USER_UNIT_NONE) && export_params.use_scene_unit) {

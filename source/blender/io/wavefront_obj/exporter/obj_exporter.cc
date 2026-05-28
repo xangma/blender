@@ -14,6 +14,7 @@
 #include "DNA_curve_enums.h"
 #include "DNA_curve_types.h"
 #include "DNA_layer_types.h"
+#include "DNA_object_types.h"
 #include "DNA_scene_types.h"
 
 #include "BKE_context.hh"
@@ -29,6 +30,8 @@
 #include "DEG_depsgraph_query.hh"
 
 #include "ED_object.hh"
+
+#include "IO_ocean_lod_disabler.hh"
 
 #include "obj_export_mesh.hh"
 #include "obj_export_nurbs.hh"
@@ -390,6 +393,12 @@ void exporter_main(bContext *C, const OBJExportParams &export_params)
   }
 
   OBJDepsgraph obj_depsgraph(C, export_params.export_eval_mode, collection);
+  OceanCameraLODDisabler ocean_camera_lod_disabler(obj_depsgraph.get());
+  if (export_params.apply_modifiers) {
+    ocean_camera_lod_disabler.disable_modifiers([&](const Object &object) {
+      return !export_params.export_selected_objects || (object.base_flag & BASE_SELECTED);
+    });
+  }
   Scene *scene = DEG_get_input_scene(obj_depsgraph.get());
   const char *filepath = export_params.filepath;
 

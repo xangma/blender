@@ -16,8 +16,13 @@
 #include "util/types_image.h"
 
 #include "kernel/geom/shader_data.h"
+#include "kernel/geom/primitive.h"
 
 #include "kernel/bvh/bvh.h"
+#include "kernel/camera/camera.h"
+#include "kernel/closure/bsdf_ocean.h"
+#include "kernel/integrator/state.h"
+#include "kernel/integrator/state_util.h"
 
 #include "kernel/osl/globals.h"
 #include "kernel/osl/services.h"
@@ -25,6 +30,11 @@
 #include "kernel/osl/strings.h"
 #include "kernel/osl/types.h"
 
+#include "kernel/svm/ao.h"
+#include "kernel/svm/bevel.h"
+
+#include "kernel/util/ies.h"
+#include "kernel/util/image_3d.h"
 CCL_NAMESPACE_BEGIN
 
 /* RenderServices implementation */
@@ -225,6 +235,13 @@ bool OSLRenderServices::get_attribute(ShaderGlobals *globals,
   }
   else {
     object = sd->object;
+  }
+
+  if (object == sd->object) {
+    float4 ocean_attr;
+    if (ocean_split_attribute_value(kg, sd, name.hash(), &ocean_attr)) {
+      return set_attribute(ocean_attr, type, derivatives, val);
+    }
   }
 
   /* find attribute on object */

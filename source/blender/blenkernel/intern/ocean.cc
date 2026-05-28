@@ -1470,6 +1470,71 @@ bool BKE_ocean_split_runtime_level_normal_data_get(const Ocean *oc,
   return true;
 }
 
+bool BKE_ocean_foam_spray_data_get(const Ocean *oc,
+                                   const OceanFoamSprayDataLayer layer,
+                                   const float foam_coverage,
+                                   const int width,
+                                   const int height,
+                                   float *r_data,
+                                   const int data_len)
+{
+  if (!oc || !r_data || width <= 0 || height <= 0 || data_len < 0) {
+    return false;
+  }
+
+  const size_t pixel_count = size_t(width) * size_t(height);
+  const size_t expected_len = pixel_count * 4;
+  if (size_t(data_len) < expected_len) {
+    return false;
+  }
+
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&oc->oceanmutex), THREAD_LOCK_READ);
+
+  if (width != oc->_M || height != oc->_N) {
+    BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+    return false;
+  }
+
+  for (int y = 0; y < height; y++) {
+    for (int x = 0; x < width; x++) {
+      const int ocean_index = x * oc->_N + y;
+      OceanResult ocr{};
+      if (oc->_do_jacobian) {
+        compute_eigenstuff(
+            &ocr, oc->_Jxx[ocean_index], oc->_Jzz[ocean_index], oc->_Jxz[ocean_index]);
+      }
+
+      float value[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+      switch (layer) {
+        case OCEAN_FOAM_SPRAY_DATA_FOAM: {
+          const float foam = BKE_ocean_jminus_to_foam(ocr.Jminus, foam_coverage);
+          value[0] = foam;
+          value[1] = foam;
+          value[2] = foam;
+          break;
+        }
+        case OCEAN_FOAM_SPRAY_DATA_SPRAY:
+          value[0] = ocr.Eplus[0];
+          value[2] = ocr.Eplus[2];
+          break;
+        case OCEAN_FOAM_SPRAY_DATA_SPRAY_INVERSE:
+          value[0] = ocr.Eminus[0];
+          value[2] = ocr.Eminus[2];
+          break;
+      }
+
+      const size_t offset = (size_t(y) * size_t(width) + size_t(x)) * 4;
+      r_data[offset + 0] = value[0];
+      r_data[offset + 1] = value[1];
+      r_data[offset + 2] = value[2];
+      r_data[offset + 3] = value[3];
+    }
+  }
+
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&oc->oceanmutex));
+  return true;
+}
+
 void BKE_ocean_eval_ij(Ocean *oc, OceanResult *ocr, int i, int j)
 {
   BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
@@ -2886,6 +2951,17 @@ bool BKE_ocean_split_runtime_level_normal_data_get(const Ocean * /*oc*/,
                                                    const int /*level_index*/,
                                                    float * /*r_normal_data*/,
                                                    const int /*normal_data_len*/)
+{
+  return false;
+}
+
+bool BKE_ocean_foam_spray_data_get(const Ocean * /*oc*/,
+                                   const OceanFoamSprayDataLayer /*layer*/,
+                                   const float /*foam_coverage*/,
+                                   const int /*width*/,
+                                   const int /*height*/,
+                                   float * /*r_data*/,
+                                   const int /*data_len*/)
 {
   return false;
 }

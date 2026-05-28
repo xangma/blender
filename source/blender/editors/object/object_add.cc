@@ -3596,6 +3596,32 @@ static Object *convert_mesh_to_pointcloud(Base &base,
   return newob;
 }
 
+static Vector<OceanModifierData *> disable_ocean_camera_lod_for_conversion(Object &ob)
+{
+  Vector<OceanModifierData *> disabled_modifiers;
+  for (ModifierData *md = static_cast<ModifierData *>(ob.modifiers.first); md != nullptr;
+       md = md->next)
+  {
+    if (md->type != eModifierType_Ocean) {
+      continue;
+    }
+    OceanModifierData *omd = reinterpret_cast<OceanModifierData *>(md);
+    if ((omd->flag & MOD_OCEAN_USE_CAMERA_LOD) == 0) {
+      continue;
+    }
+    omd->flag &= ~MOD_OCEAN_USE_CAMERA_LOD;
+    disabled_modifiers.append(omd);
+  }
+  return disabled_modifiers;
+}
+
+static void restore_ocean_camera_lod_after_conversion(Span<OceanModifierData *> modifiers)
+{
+  for (OceanModifierData *omd : modifiers) {
+    omd->flag |= MOD_OCEAN_USE_CAMERA_LOD;
+  }
+}
+
 static Object *convert_mesh_to_mesh(Base &base, ObjectConversionInfo &info, Base **r_new_base)
 {
   Object *ob = base.object;
@@ -3606,12 +3632,25 @@ static Object *convert_mesh_to_mesh(Base &base, ObjectConversionInfo &info, Base
   /* NOTE: get the mesh from the original, not from the copy in some
    * cases this doesn't give correct results (when MDEF is used for eg)
    */
+  /* Camera LOD is view-dependent, so conversion must bake the dense Ocean surface. */
+  Vector<OceanModifierData *> disabled_ocean_camera_lod =
+      disable_ocean_camera_lod_for_conversion(*ob);
+  if (!disabled_ocean_camera_lod.is_empty()) {
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    BKE_scene_graph_update_tagged(info.depsgraph, info.bmain);
+  }
+
   const Object *ob_eval = DEG_get_evaluated(info.depsgraph, ob);
   const Mesh *mesh_eval = BKE_object_get_evaluated_mesh(ob_eval);
   Mesh *new_mesh = mesh_eval ? BKE_mesh_copy_for_eval(*mesh_eval) :
                                BKE_mesh_new_nomain(0, 0, 0, 0);
   BKE_mesh_wrapper_ensure_mdata(new_mesh);
 
+  if (info.keep_original && !disabled_ocean_camera_lod.is_empty()) {
+    restore_ocean_camera_lod_after_conversion(disabled_ocean_camera_lod);
+    DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
+    BKE_scene_graph_update_tagged(info.depsgraph, info.bmain);
+  }
   BKE_object_material_from_eval_data(info.bmain, newob, &new_mesh->id);
   /* Anonymous attributes shouldn't be available on the applied geometry. */
   new_mesh->attributes_for_write().remove_anonymous();

@@ -15,6 +15,10 @@
 
 #include "ED_util.hh"
 
+#include "DNA_layer_types.h"
+#include "DNA_object_types.h"
+
+#include "IO_ocean_lod_disabler.hh"
 #include "IO_ply.hh"
 
 #include "ply_data.hh"
@@ -64,6 +68,13 @@ void exporter_main(bContext *C, const PLYExportParams &export_params)
     DEG_graph_build_from_view_layer(depsgraph);
   }
   BKE_scene_graph_update_tagged(depsgraph, bmain);
+
+  OceanCameraLODDisabler ocean_camera_lod_disabler(depsgraph);
+  if (export_params.apply_modifiers) {
+    ocean_camera_lod_disabler.disable_modifiers([&](const Object &object) {
+      return !export_params.export_selected_objects || (object.base_flag & BASE_SELECTED);
+    });
+  }
 
   load_plydata(*plyData, depsgraph, export_params);
 

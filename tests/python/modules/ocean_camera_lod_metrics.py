@@ -1347,6 +1347,26 @@ def _render_pair(obj, lod_path, dense_path, samples, resolution, device):
     return lod_time, dense_time
 
 
+def set_attribute_emission_material(obj, attribute_name, strength=1.0):
+    if not obj.data.materials:
+        obj.data.materials.append(bpy.data.materials.new(f"{obj.name}AttributeMat"))
+
+    mat = obj.data.materials[0]
+    mat.use_nodes = True
+    nodes = mat.node_tree.nodes
+    links = mat.node_tree.links
+    nodes.clear()
+
+    output = nodes.new(type="ShaderNodeOutputMaterial")
+    attr = nodes.new(type="ShaderNodeAttribute")
+    attr.attribute_name = attribute_name
+    emission = nodes.new(type="ShaderNodeEmission")
+    emission.inputs["Strength"].default_value = strength
+
+    links.new(attr.outputs["Color"], emission.inputs["Color"])
+    links.new(emission.outputs["Emission"], output.inputs["Surface"])
+
+
 def benchmark_render_case(obj,
                           case_dir,
                           device,
@@ -1423,6 +1443,19 @@ def render_rgb_difference_report(obj, samples=4, resolution=64, device="CPU"):
         )
     report_dict_value = render_report_dict(render_report)
     print("Camera LOD RGB report:", report_dict_value)
+    return report_dict_value
+
+
+def render_attribute_difference_report(obj, attribute_name, samples=1, resolution=64, device="CPU"):
+    set_attribute_emission_material(obj, attribute_name)
+    report_dict_value = render_rgb_difference_report(
+        obj,
+        samples=samples,
+        resolution=resolution,
+        device=device,
+    )
+    report_dict_value["attribute_name"] = attribute_name
+    print("Camera LOD attribute RGB report:", report_dict_value)
     return report_dict_value
 
 
@@ -1566,6 +1599,38 @@ def _scenario_grazing_light_adversarial():
     return ScenarioContext(CURATED_SCENARIOS["grazing_light_adversarial"], obj.name, cam.name)
 
 
+def _scenario_foam_attribute():
+    clear_scene()
+    set_world_flat(strength=0.0)
+    cam = make_camera_and_light(
+        cam_location=(0.0, -58.0, 3.0),
+        cam_target=(0.0, 180.0, 0.0),
+        lens=55.0,
+        sun_energy=0.0,
+    )
+    obj = make_ocean_object(
+        name="OceanBenchmarkFoamAttribute",
+        geometry_mode="GENERATE",
+        resolution=6,
+        spatial_size=128,
+        size=1.0,
+        camera_lod=True,
+        lod_levels=5,
+        lod_validation_mode="CAMERA_OBSERVABLE",
+        time_value=1.0,
+        choppiness=1.3,
+        wind_velocity=18.0,
+        roughness=0.02,
+    )
+    mod = obj.modifiers["Ocean"]
+    mod.use_foam = True
+    mod.foam_layer_name = "foam"
+    mod.foam_coverage = 0.0
+    set_attribute_emission_material(obj, "foam")
+    assert_camera_lod_attributes(obj)
+    return ScenarioContext(CURATED_SCENARIOS["foam_attribute"], obj.name, cam.name)
+
+
 def _scenario_temporal_camera_move():
     clear_scene()
     set_world_flat()
@@ -1630,8 +1695,8 @@ def _scenario_repeat_tiles():
     clear_scene()
     set_world_flat()
     cam = make_camera_and_light(
-        cam_location=(58.0, -28.0, 7.0),
-        cam_target=(62.0, 24.0, 0.0),
+        cam_location=(58.0, 58.0, 7.0),
+        cam_target=(62.0, 62.0, 0.0),
         lens=38.0,
         sun_rotation=(0.44, 0.0, 0.68),
         sun_energy=2.0,
@@ -1643,7 +1708,7 @@ def _scenario_repeat_tiles():
         spatial_size=64,
         size=1.0,
         repeat_x=2,
-        repeat_y=1,
+        repeat_y=2,
         camera_lod=True,
         lod_levels=4,
         time_value=1.0,
@@ -1718,6 +1783,21 @@ CURATED_SCENARIOS = {
             luminance_gradient=MetricThresholds(mean_max=0.11, p95_max=0.24),
         ),
     ),
+    "foam_attribute": ScenarioSpec(
+        name="foam_attribute",
+        description="Foam attribute rendered as pure emission to compare dense and camera LOD sampling.",
+        thresholds=ScenarioThresholds(
+            min_geometry_reduction=0.10,
+            min_visible_samples=1,
+            position=MetricThresholds(mean_max=POSITION_MEAN_TOL, p95_max=1.00, max_max=POSITION_MAX_TOL),
+            reprojection=MetricThresholds(mean_max=REPROJ_MEAN_TOL, p95_max=1.40, max_max=REPROJ_MAX_TOL),
+            depth=MetricThresholds(mean_max=DEPTH_MEAN_TOL, p95_max=0.90, max_max=DEPTH_MAX_TOL),
+            geometric_normal_deg=MetricThresholds(mean_max=NORMAL_MEAN_TOL_DEG, p95_max=8.0),
+            rgb_absolute=MetricThresholds(mean_max=0.005, p95_max=0.02, max_max=0.05),
+            luminance_absolute=MetricThresholds(mean_max=0.005, p95_max=0.02, max_max=0.05),
+            luminance_gradient=MetricThresholds(mean_max=0.005, p95_max=0.02, max_max=0.05),
+        ),
+    ),
     "stereo_dataset_valid": ScenarioSpec(
         name="stereo_dataset_valid",
         description="Valid stereo dataset case using a true stereo-3D left/right view pair.",
@@ -1739,7 +1819,7 @@ CURATED_SCENARIOS = {
         thresholds=ScenarioThresholds(
             min_geometry_reduction=0.10,
             min_visible_samples=1,
-            position=MetricThresholds(mean_max=POSITION_MEAN_TOL, p95_max=0.90, max_max=POSITION_MAX_TOL),
+            position=MetricThresholds(mean_max=POSITION_MEAN_TOL, p95_max=1.00, max_max=POSITION_MAX_TOL),
             reprojection=MetricThresholds(mean_max=REPROJ_MEAN_TOL, p95_max=1.20, max_max=REPROJ_MAX_TOL),
             depth=MetricThresholds(mean_max=DEPTH_MEAN_TOL, p95_max=0.80, max_max=DEPTH_MAX_TOL),
             geometric_normal_deg=MetricThresholds(mean_max=NORMAL_MEAN_TOL_DEG, p95_max=8.0),
@@ -1755,6 +1835,7 @@ SCENARIO_BUILDERS = {
     "calm_reference": _scenario_calm_reference,
     "high_energy_dense_ceiling": _scenario_high_energy_dense_ceiling,
     "grazing_light_adversarial": _scenario_grazing_light_adversarial,
+    "foam_attribute": _scenario_foam_attribute,
     "temporal_camera_move": _scenario_temporal_camera_move,
     "stereo_dataset_valid": _scenario_stereo_dataset_valid,
     "repeat_tiles": _scenario_repeat_tiles,

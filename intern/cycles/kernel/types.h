@@ -1471,6 +1471,14 @@ struct KernelObject {
   packed_float3 ocean_split_cumulative_slope_moments_pre[OCEAN_SPLIT_MAX_LEVELS];
   packed_float3 ocean_split_cumulative_slope_moments_post[OCEAN_SPLIT_MAX_LEVELS];
   int ocean_split_shading_mode;
+  uint64_t ocean_foam_attribute_id;
+  uint64_t ocean_spray_attribute_id;
+  int ocean_foam_texture_slot;
+  int ocean_foam_texture_slot_pre;
+  int ocean_foam_texture_slot_post;
+  int ocean_spray_texture_slot;
+  int ocean_spray_texture_slot_pre;
+  int ocean_spray_texture_slot_post;
 
   uint visibility;
   int primitive_type;
