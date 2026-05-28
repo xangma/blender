@@ -21,6 +21,7 @@
 #include "util/algorithm.h"
 #include "util/disjoint_set.h"
 
+#include "util/color.h"
 #include "util/hash.h"
 #include "util/log.h"
 #include "util/math.h"
@@ -154,6 +155,30 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   vector<float> pixels_;
 };
 
+static float ocean_byte_color_channel_to_scene_linear(const float value)
+{
+  const int byte_value = int(value * 255.0f);
+  return color_srgb_to_linear(byte_to_float(uchar(byte_value)));
+}
+
+static float ocean_byte_alpha_channel_to_float(const float value)
+{
+  const int byte_value = std::clamp(int(value * 255.0f), 0, 255);
+  return byte_to_float(uchar(byte_value));
+}
+
+static void ocean_convert_to_legacy_byte_color_attribute_space(vector<float> &pixels)
+{
+  /* Dense Ocean foam/spray is exposed as a byte color attribute, which Cycles converts to
+   * scene-linear values during attribute lookup. Match that behavior for shader-side sampling. */
+  for (size_t offset = 0; offset + 3 < pixels.size(); offset += 4) {
+    pixels[offset + 0] = ocean_byte_color_channel_to_scene_linear(pixels[offset + 0]);
+    pixels[offset + 1] = ocean_byte_color_channel_to_scene_linear(pixels[offset + 1]);
+    pixels[offset + 2] = ocean_byte_color_channel_to_scene_linear(pixels[offset + 2]);
+    pixels[offset + 3] = ocean_byte_alpha_channel_to_float(pixels[offset + 3]);
+  }
+}
+
 class BlenderOceanFoamSprayLoader : public ImageLoader {
  public:
   BlenderOceanFoamSprayLoader(const blender::Ocean *ocean,
@@ -213,7 +238,10 @@ class BlenderOceanFoamSprayLoader : public ImageLoader {
       pixels_.clear();
       width_ = 0;
       height_ = 0;
+      return;
     }
+
+    ocean_convert_to_legacy_byte_color_attribute_space(pixels_);
   }
 
   string name() const override
@@ -1724,6 +1752,8 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
     const blender::OceanModifierData *omd = ocean_omd;
     if (omd != nullptr) {
       if (motion_step == 0) {
+        /* Dense Cycles color attributes are sampled from the center frame during motion blur.
+         * Keep shader-side foam/spray attributes on the same frame for parity. */
         sync_ocean_split_runtime_step_resources(scene,
                                                 omd,
                                                 &mesh->ocean_split_slope_images_pre,
@@ -1733,8 +1763,8 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
                                                 nullptr,
                                                 nullptr,
                                                 nullptr,
-                                                &mesh->ocean_foam_image_pre,
-                                                &mesh->ocean_spray_image_pre);
+                                                nullptr,
+                                                nullptr);
       }
       if (motion_step == mesh->get_motion_steps() - 2) {
         sync_ocean_split_runtime_step_resources(scene,
@@ -1746,8 +1776,8 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
                                                 nullptr,
                                                 nullptr,
                                                 nullptr,
-                                                &mesh->ocean_foam_image_post,
-                                                &mesh->ocean_spray_image_post);
+                                                nullptr,
+                                                nullptr);
       }
     }
   }

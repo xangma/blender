@@ -42,6 +42,7 @@ camera_lod_level_histogram = ocean_metrics.camera_lod_level_histogram
 camera_lod_topology_report = ocean_metrics.camera_lod_topology_report
 camera_lod_visible_coverage_report = ocean_metrics.camera_lod_visible_coverage_report
 render_rgb_difference_report = ocean_metrics.render_rgb_difference_report
+render_attribute_difference_report = ocean_metrics.render_attribute_difference_report
 
 
 def camera_center_ray_ocean_intersection(cam):
@@ -100,6 +101,7 @@ def assert_ocean_camera_lod_metrics_module_contract():
         "calm_reference",
         "high_energy_dense_ceiling",
         "grazing_light_adversarial",
+        "foam_attribute",
         "temporal_camera_move",
         "stereo_dataset_valid",
         "repeat_tiles",
@@ -640,7 +642,19 @@ def assert_stereo_dataset_reference_validation():
     assert report["max_geometric_normal_error_deg"] < NORMAL_MAX_TOL_DEG
 
 
-def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
+def assert_foam_spray_attribute_report_matches_dense(report, attribute_name):
+    assert report["dense_luminance_range"] > 0.01, (
+        f"{attribute_name} parity render must contain a spatially varying dense reference"
+    )
+    assert report["max_dense_luminance_gradient"] > 0.001, (
+        f"{attribute_name} parity render must contain enough dense contrast to catch mapping shifts"
+    )
+    assert report["mean_absolute_error"] < 0.005, report
+    assert report["p95_absolute_error"] < 0.02, report
+    assert report["max_absolute_error"] < 0.05, report
+
+
+def assert_camera_lod_foam_attribute_matches_dense_reference(use_spray):
     clear_scene()
     make_camera_and_light(
         cam_location=(0.0, -58.0, 3.0),
@@ -665,7 +679,8 @@ def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
     mod = obj.modifiers["Ocean"]
     mod.use_foam = True
     mod.foam_layer_name = "foam"
-    mod.use_spray = True
+    mod.foam_coverage = 0.0
+    mod.use_spray = use_spray
     mod.spray_layer_name = "spray"
     bpy.context.view_layer.update()
     assert_camera_lod_attributes(obj)
@@ -677,30 +692,41 @@ def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
         "Cycles foam/spray camera LOD should keep adaptive geometry; full-spectrum foam/spray "
         "is sampled by the shader instead of requiring dense geometry"
     )
-    assert {"foam", "spray"}.issubset(lod_attrs), "Foam/spray layer names should still be exported"
+    expected_attrs = {"foam", "spray"} if use_spray else {"foam"}
+    assert expected_attrs.issubset(lod_attrs), (
+        f"Foam/spray layer names should still be exported; expected {expected_attrs}, got {lod_attrs}"
+    )
     assert lod_verts < dense_verts and lod_faces < dense_faces, (
         "Foam/spray camera LOD should remain adaptive; "
         f"lod={(lod_verts, lod_faces, lod_unused)}, dense={(dense_verts, dense_faces, dense_unused)}"
     )
 
-    mat = obj.data.materials[0]
-    nodes = mat.node_tree.nodes
-    links = mat.node_tree.links
-    for node in list(nodes):
-        if node.name != "Material Output":
-            nodes.remove(node)
-    output = nodes["Material Output"]
-    attr = nodes.new("ShaderNodeAttribute")
-    attr.attribute_name = "foam"
-    emission = nodes.new("ShaderNodeEmission")
-    emission.inputs["Strength"].default_value = 1.0
-    links.new(attr.outputs["Color"], emission.inputs["Color"])
-    links.new(emission.outputs["Emission"], output.inputs["Surface"])
+    for attribute_name in (["foam", "spray"] if use_spray else ["foam"]):
+        report = render_attribute_difference_report(obj, attribute_name, samples=1, resolution=64)
+        assert_foam_spray_attribute_report_matches_dense(report, attribute_name)
 
-    report = render_rgb_difference_report(obj, samples=4, resolution=64)
-    assert report["mean_absolute_error"] < RGB_MAE_TOL, report
-    assert report["p95_absolute_error"] < 0.30, report
-    assert report["max_absolute_error"] < 0.50, report
+    if use_spray:
+        scene = bpy.context.scene
+        scene.frame_start = 9
+        scene.frame_end = 11
+        scene.render.use_motion_blur = True
+        scene.render.motion_blur_shutter = 1.0
+        if hasattr(scene.render, "motion_blur_position"):
+            scene.render.motion_blur_position = "CENTER"
+        for frame, time_value in ((9, 0.65), (10, 1.0), (11, 1.35)):
+            scene.frame_set(frame)
+            mod.time = time_value
+            mod.keyframe_insert(data_path="time", frame=frame)
+        scene.frame_set(10)
+
+        for attribute_name in ("foam", "spray"):
+            report = render_attribute_difference_report(obj, attribute_name, samples=1, resolution=64)
+            assert_foam_spray_attribute_report_matches_dense(report, attribute_name)
+
+
+def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
+    assert_camera_lod_foam_attribute_matches_dense_reference(use_spray=False)
+    assert_camera_lod_foam_attribute_matches_dense_reference(use_spray=True)
 
 
 def assert_stereo_dataset_wide_footprint_uses_multiple_levels():

@@ -146,7 +146,11 @@ ccl_device_inline float ocean_split_level_variance(const ccl_global KernelObject
     return 0.0f;
   }
 
-  const float sigma = 0.5f * kobject->ocean_split_min_wavelength * exp2f(float(level_index));
+  float wavelength_scale = 1.0f;
+  for (int i = 0; i < level_index; i++) {
+    wavelength_scale *= 2.0f;
+  }
+  const float sigma = 0.5f * kobject->ocean_split_min_wavelength * wavelength_scale;
   const float sigma_min = 0.5f * kobject->ocean_split_min_wavelength;
   return fmaxf(0.0f, sigma * sigma - sigma_min * sigma_min);
 }
@@ -160,9 +164,14 @@ ccl_device_inline int ocean_split_support_base_level(const ccl_global KernelObje
 
   const float minor_wavelength = 2.0f * sqrtf(fmaxf(minor_variance, 0.0f));
   const float clamped_wavelength = fmaxf(minor_wavelength, kobject->ocean_split_min_wavelength);
-  int level_index = int(
-      floorf(log2f(clamped_wavelength / kobject->ocean_split_min_wavelength)));
-  level_index = clamp(level_index, 0, kobject->ocean_split_level_count - 1);
+  int level_index = 0;
+  float level_wavelength = kobject->ocean_split_min_wavelength;
+  while (level_index + 1 < kobject->ocean_split_level_count &&
+         clamped_wavelength >= level_wavelength * 2.0f)
+  {
+    level_index++;
+    level_wavelength *= 2.0f;
+  }
 
   float base_variance = ocean_split_level_variance(kobject, level_index);
   while (level_index > 0 && base_variance > minor_variance + 1.0e-10f) {
@@ -184,7 +193,7 @@ ccl_device_inline float3 ocean_split_covariance_subtract_isotropic(const float3 
 ccl_device_inline float3 ocean_split_support_visible_moment(
     const ccl_global KernelObject *kobject, const float3 support_covariance)
 {
-  const packed_float3 *moments = kobject->ocean_split_cumulative_slope_moments;
+  const ccl_global packed_float3 *moments = kobject->ocean_split_cumulative_slope_moments;
   float minor_variance, major_variance;
   ocean_split_covariance_eigenvalues(support_covariance, &minor_variance, &major_variance);
 
@@ -207,7 +216,7 @@ ccl_device_inline float3 ocean_split_support_visible_moment(
 
 ccl_device_inline float3 ocean_split_support_visible_moment(
     const ccl_global KernelObject *kobject,
-    const packed_float3 *moments,
+    const ccl_global packed_float3 *moments,
     const float3 support_covariance)
 {
   float minor_variance, major_variance;
@@ -454,6 +463,45 @@ ccl_device_inline void ocean_split_time_pair_slots(const ccl_private ShaderData 
   }
 }
 
+ccl_device_inline float ocean_split_wrap_fraction(const float value)
+{
+  return value - floorf(value);
+}
+
+ccl_device_inline float4 ocean_split_sample_legacy_corner_attribute(
+    KernelGlobals kg,
+    const int slot,
+    const float2 ref_uv,
+    const int resolution_x,
+    const int resolution_y)
+{
+  const float x = ocean_split_wrap_fraction(ref_uv.x) * float(resolution_x);
+  const float y = ocean_split_wrap_fraction(ref_uv.y) * float(resolution_y);
+  const int ix0 = min(int(floorf(x)), resolution_x - 1);
+  const int iy0 = min(int(floorf(y)), resolution_y - 1);
+  const int ix1 = (ix0 + 1) % resolution_x;
+  const int iy1 = (iy0 + 1) % resolution_y;
+  const float fx = x - float(ix0);
+  const float fy = y - float(iy0);
+
+  const float sample_u0 = (float(ix0) + 0.5f) / float(resolution_x);
+  const float sample_u1 = (float(ix1) + 0.5f) / float(resolution_x);
+  const float sample_v0 = (float(iy0) + 0.5f) / float(resolution_y);
+  const float sample_v1 = (float(iy1) + 0.5f) / float(resolution_y);
+
+  const float4 v00 = kernel_image_interp(kg, slot, sample_u0, sample_v0);
+  const float4 v10 = kernel_image_interp(kg, slot, sample_u1, sample_v0);
+  const float4 v11 = kernel_image_interp(kg, slot, sample_u1, sample_v1);
+  const float4 v01 = kernel_image_interp(kg, slot, sample_u0, sample_v1);
+
+  /* Dense Ocean foam/spray is stored on quad corners and rendered through Blender's
+   * standard 0-1-2 / 0-2-3 quad tessellation. */
+  if (fy <= fx) {
+    return ((1.0f - fx) * v00) + ((fx - fy) * v10) + (fy * v11);
+  }
+  return ((1.0f - fy) * v00) + (fx * v11) + ((fy - fx) * v01);
+}
+
 ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
                                                    const ccl_private ShaderData *sd,
                                                    const uint64_t attr_id,
@@ -492,8 +540,8 @@ ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
   if (!ocean_split_ref_uv(kg, sd, &ref_uv)) {
     return false;
   }
-  const float sample_u = ref_uv.x + 0.5f / float(ocean_split_level_resolution_x(kobject, 0));
-  const float sample_v = ref_uv.y + 0.5f / float(ocean_split_level_resolution_y(kobject, 0));
+  const int resolution_x = ocean_split_level_resolution_x(kobject, 0);
+  const int resolution_y = ocean_split_level_resolution_y(kobject, 0);
 
   int slot0, slot1;
   float t;
@@ -502,13 +550,15 @@ ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
     return false;
   }
 
-  const float4 value0 = kernel_image_interp(kg, slot0, sample_u, sample_v);
+  const float4 value0 = ocean_split_sample_legacy_corner_attribute(
+      kg, slot0, ref_uv, resolution_x, resolution_y);
   if (slot1 < 0 || slot1 == slot0) {
     *r_value = value0;
     return true;
   }
 
-  const float4 value1 = kernel_image_interp(kg, slot1, sample_u, sample_v);
+  const float4 value1 = ocean_split_sample_legacy_corner_attribute(
+      kg, slot1, ref_uv, resolution_x, resolution_y);
   *r_value = value0 + t * (value1 - value0);
   return true;
 }
@@ -698,7 +748,7 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
                                                                  kobject, level_index),
                                                              ocean_split_level_cell_size_z(
                                                                  kobject, level_index));
-  *r_visible_slope = interp(slope0, slope1, time_t);
+  *r_visible_slope = slope0 + time_t * (slope1 - slope0);
   *r_geometry_slope = make_float2(-geometry_normal.x / geometry_normal.y,
                                   -geometry_normal.z / geometry_normal.y);
   *r_geometry_support_covariance = geometry_support_covariance;
