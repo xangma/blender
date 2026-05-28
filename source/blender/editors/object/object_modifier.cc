@@ -3161,6 +3161,11 @@ static void oceanbake_update(void *customdata, float progress, int *cancel)
   *(oj->progress) = progress;
 }
 
+static void oceanbake_noop_update(void * /*customdata*/, float /*progress*/, int *cancel)
+{
+  *cancel = 0;
+}
+
 static void oceanbake_startjob(void *customdata, wmJobWorkerStatus *worker_status)
 {
   OceanBakeJob *oj = static_cast<OceanBakeJob *>(customdata);
@@ -3249,17 +3254,19 @@ static wmOperatorStatus ocean_bake_exec(bContext *C, wmOperator *op)
   Ocean *ocean = BKE_ocean_add();
   BKE_ocean_init_from_modifier(ocean, omd, omd->resolution);
 
-#if 0
-  BKE_ocean_bake(ocean, och);
+  if (G.background) {
+    BKE_ocean_bake(ocean, och, oceanbake_noop_update, nullptr);
+    BKE_ocean_free(ocean);
 
-  omd->oceancache = och;
-  omd->cached = true;
+    omd->oceancache = och;
+    omd->cached = true;
 
-  scene->r.cfra = cfra;
+    scene->r.cfra = cfra;
 
-  DEG_id_tag_update(&ob->id, ID_RECALC_GEOMETRY);
-  WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
-#endif
+    DEG_id_tag_update(&ob->id, ID_RECALC_SYNC_TO_EVAL | ID_RECALC_GEOMETRY);
+    WM_event_add_notifier(C, NC_OBJECT | ND_MODIFIER, ob);
+    return OPERATOR_FINISHED;
+  }
 
   /* job stuff */
 

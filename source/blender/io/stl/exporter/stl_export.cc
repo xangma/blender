@@ -29,6 +29,7 @@
 #include "BLI_math_vector.hh"
 #include "BLI_math_vector_types.hh"
 
+#include "IO_ocean_lod_disabler.hh"
 #include "IO_stl.hh"
 
 #include "stl_data.hh"
@@ -185,6 +186,11 @@ void exporter_main(const bContext *C, const STLExportParams &export_params)
   }
   else {
     depsgraph = CTX_data_ensure_evaluated_depsgraph(C);
+  }
+
+  OceanCameraLODDisabler ocean_camera_lod_disabler(depsgraph);
+  if (export_params.apply_modifiers) {
+    ocean_camera_lod_disabler.disable_modifiers();
   }
 
   float scene_unit_scale = 1.0f;

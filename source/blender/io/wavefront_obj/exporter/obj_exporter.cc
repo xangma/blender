@@ -30,6 +30,8 @@
 
 #include "ED_object.hh"
 
+#include "IO_ocean_lod_disabler.hh"
+
 #include "obj_export_mesh.hh"
 #include "obj_export_nurbs.hh"
 #include "obj_exporter.hh"
@@ -390,6 +392,10 @@ void exporter_main(bContext *C, const OBJExportParams &export_params)
   }
 
   OBJDepsgraph obj_depsgraph(C, export_params.export_eval_mode, collection);
+  OceanCameraLODDisabler ocean_camera_lod_disabler(obj_depsgraph.get());
+  if (export_params.apply_modifiers) {
+    ocean_camera_lod_disabler.disable_modifiers();
+  }
   Scene *scene = DEG_get_input_scene(obj_depsgraph.get());
   const char *filepath = export_params.filepath;
 

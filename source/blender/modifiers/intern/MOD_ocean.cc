@@ -2426,11 +2426,17 @@ static int ocean_camera_lod_clamp_level_count(const int dense_cells_x,
 {
   int level_count = 1;
   int stride = std::max(base_stride, 1);
-  while (level_count < requested_levels && (dense_cells_x % (stride << 1)) == 0 &&
-         (dense_cells_y % (stride << 1)) == 0 && (dense_cells_x / (stride << 1)) >= 4 &&
-         (dense_cells_y / (stride << 1)) >= 4)
-  {
-    stride <<= 1;
+  while (level_count < requested_levels) {
+    const int next_stride = stride << 1;
+    if ((dense_cells_x / next_stride) < 4 || (dense_cells_y / next_stride) < 4) {
+      break;
+    }
+    const bool divides_evenly = (dense_cells_x % next_stride) == 0 &&
+                                (dense_cells_y % next_stride) == 0;
+    if (!divides_evenly && level_count > 1) {
+      break;
+    }
+    stride = next_stride;
     level_count++;
   }
   return level_count;
