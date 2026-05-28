@@ -37,6 +37,8 @@
 
 #include "kernel/camera/camera.h"
 
+#include "kernel/closure/bsdf_ocean.h"
+
 #include "kernel/svm/ao.h"
 #include "kernel/svm/bevel.h"
 
@@ -984,6 +986,13 @@ bool OSLRenderServices::get_attribute(ShaderGlobals *globals,
   }
   else {
     object = sd->object;
+  }
+
+  if (object == sd->object) {
+    float4 ocean_attr;
+    if (ocean_split_attribute_value(kg, sd, name.hash(), &ocean_attr)) {
+      return set_attribute(ocean_attr, type, derivatives, val);
+    }
   }
 
   /* find attribute on object */

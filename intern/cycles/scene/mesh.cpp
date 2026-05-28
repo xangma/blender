@@ -424,6 +424,14 @@ void Mesh::clear_non_sockets()
   ocean_split_min_wavelength = 0.0f;
   ocean_split_cell_size_x.clear();
   ocean_split_cell_size_z.clear();
+  ocean_foam_image.clear();
+  ocean_foam_image_pre.clear();
+  ocean_foam_image_post.clear();
+  ocean_spray_image.clear();
+  ocean_spray_image_pre.clear();
+  ocean_spray_image_post.clear();
+  ocean_foam_attribute = ustring();
+  ocean_spray_attribute = ustring();
   ocean_modifier_active = false;
   ocean_camera_lod_active = false;
 }

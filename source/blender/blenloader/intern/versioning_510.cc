@@ -8,20 +8,27 @@
 
 #define DNA_DEPRECATED_ALLOW
 
+/* Define macros in `DNA_genfile.h`. */
+#define DNA_GENFILE_VERSIONING_MACROS
+
 #include "DNA_ID.h"
 
 #include "DNA_brush_enums.h"
 #include "DNA_brush_types.h"
+#include "DNA_genfile.h"
 #include "DNA_light_types.h"
 #include "DNA_material_types.h"
 #include "DNA_mesh_types.h"
+#include "DNA_modifier_types.h"
 #include "DNA_node_types.h"
+#include "DNA_object_types.h"
 #include "DNA_screen_types.h"
 #include "DNA_sequence_types.h"
 #include "DNA_windowmanager_types.h"
 #include "DNA_workspace_types.h"
 
 #include "BLI_listbase.h"
+#include "BLI_listbase_wrapper.hh"
 #include "BLI_math_vector.h"
 #include "BLI_string.h"
 #include "BLI_sys_types.h"
@@ -609,6 +616,64 @@ static void convert_brush_flags_to_type(Brush &brush)
   }
 }
 
+static void version_ocean_modifier_defaults_510(FileData *fd, Main *bmain)
+{
+  const bool added_realsea = !DNA_struct_member_exists(
+      fd->filesdna, "OceanModifierData", "float", "realsea_fmin");
+  const bool added_lod = !DNA_struct_member_exists(
+      fd->filesdna, "OceanModifierData", "float", "lod_pixel_error");
+
+  for (Object &object : bmain->objects) {
+    for (ModifierData *md : ListBaseWrapper<ModifierData>(&object.modifiers)) {
+      if (md->type != eModifierType_Ocean) {
+        continue;
+      }
+
+      OceanModifierData *omd = reinterpret_cast<OceanModifierData *>(md);
+      if (added_realsea) {
+        omd->flag |= MOD_OCEAN_USE_WAVE_SCALE | MOD_OCEAN_USE_REALSEA_SPREAD;
+        omd->realsea_fmin = 0.05f;
+        omd->realsea_fmax = 1.0f;
+        omd->realsea_dvar = 1.0f;
+      }
+      else if (omd->realsea_dvar <= 0.0f) {
+        omd->realsea_dvar = 1.0f;
+      }
+
+      if (added_lod) {
+        omd->lod_levels = 5;
+        omd->lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+        omd->lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+        omd->lod_pixel_error = 0.5f;
+        omd->lod_camera_full_spectrum_radius = 0.0f;
+      }
+      else {
+        if (omd->lod_levels <= 0) {
+          omd->lod_levels = 5;
+        }
+        if (!ELEM(omd->lod_usage_mode,
+                  MOD_OCEAN_LOD_USAGE_GENERAL_RENDER,
+                  MOD_OCEAN_LOD_USAGE_STEREO_DATASET))
+        {
+          omd->lod_usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+        }
+        if (!ELEM(omd->lod_validation_mode,
+                  MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE,
+                  MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT))
+        {
+          omd->lod_validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+        }
+        if (omd->lod_pixel_error <= 0.0f) {
+          omd->lod_pixel_error = 0.5f;
+        }
+        if (omd->lod_camera_full_spectrum_radius < 0.0f) {
+          omd->lod_camera_full_spectrum_radius = 0.0f;
+        }
+      }
+    }
+  }
+}
+
 void do_versions_after_linking_510(FileData *fd, Main *bmain)
 {
   /* Some blend files were saved with an invalid active viewer key, possibly due to a bug that
@@ -682,7 +747,7 @@ void do_versions_after_linking_510(FileData *fd, Main *bmain)
    */
 }
 
-void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_510(FileData *fd, Library * /*lib*/, Main *bmain)
 {
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 1)) {
     FOREACH_NODETREE_BEGIN (bmain, node_tree, id) {
@@ -919,6 +984,10 @@ void blo_do_versions_510(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
         }
       }
     }
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 501, 31)) {
+    version_ocean_modifier_defaults_510(fd, bmain);
   }
 
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 30)) {

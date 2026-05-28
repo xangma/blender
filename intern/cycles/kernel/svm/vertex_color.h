@@ -4,6 +4,8 @@
 
 #pragma once
 
+#include "kernel/closure/bsdf_ocean.h"
+
 #include "kernel/geom/attribute.h"
 #include "kernel/geom/primitive.h"
 #include "kernel/svm/util.h"
@@ -20,6 +22,13 @@ ccl_device_noinline void svm_node_vertex_color(KernelGlobals kg,
   uint color_offset;
   uint alpha_offset;
   svm_unpack_node_uchar3(node.y, &layer_id, &color_offset, &alpha_offset);
+
+  float4 ocean_attr;
+  if (ocean_split_attribute_value(kg, sd, layer_id, &ocean_attr)) {
+    stack_store_float3(stack, color_offset, make_float3(ocean_attr));
+    stack_store_float(stack, alpha_offset, ocean_attr.w);
+    return;
+  }
 
   const AttributeDescriptor descriptor = find_attribute(kg, sd, layer_id);
   if (descriptor.offset != ATTR_STD_NOT_FOUND) {
@@ -50,6 +59,13 @@ ccl_device_noinline void svm_node_vertex_color_bump_dx(KernelGlobals kg,
   uint alpha_offset;
   svm_unpack_node_uchar3(node.y, &layer_id, &color_offset, &alpha_offset);
   const float bump_filter_width = __uint_as_float(node.z);
+
+  float4 ocean_attr;
+  if (ocean_split_attribute_value(kg, sd, layer_id, &ocean_attr)) {
+    stack_store_float3(stack, color_offset, make_float3(ocean_attr));
+    stack_store_float(stack, alpha_offset, ocean_attr.w);
+    return;
+  }
 
   const AttributeDescriptor descriptor = find_attribute(kg, sd, layer_id);
   if (descriptor.offset != ATTR_STD_NOT_FOUND) {
@@ -82,6 +98,13 @@ ccl_device_noinline void svm_node_vertex_color_bump_dy(KernelGlobals kg,
   uint alpha_offset;
   svm_unpack_node_uchar3(node.y, &layer_id, &color_offset, &alpha_offset);
   const float bump_filter_width = __uint_as_float(node.z);
+
+  float4 ocean_attr;
+  if (ocean_split_attribute_value(kg, sd, layer_id, &ocean_attr)) {
+    stack_store_float3(stack, color_offset, make_float3(ocean_attr));
+    stack_store_float(stack, alpha_offset, ocean_attr.w);
+    return;
+  }
 
   const AttributeDescriptor descriptor = find_attribute(kg, sd, layer_id);
   if (descriptor.offset != ATTR_STD_NOT_FOUND) {

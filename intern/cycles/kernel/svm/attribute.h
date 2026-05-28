@@ -6,6 +6,8 @@
 
 #include "kernel/globals.h"
 
+#include "kernel/closure/bsdf_ocean.h"
+
 #include "kernel/geom/attribute.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/primitive.h"
@@ -202,6 +204,12 @@ ccl_device_noinline void svm_node_attr(KernelGlobals kg,
       object_inverse_position_transform(kg, sd, &f);
     }
     svm_node_attr_store(type, stack, out_offset, f);
+    return;
+  }
+
+  float4 ocean_attr;
+  if (ocean_split_attribute_value(kg, sd, node.y, &ocean_attr)) {
+    svm_node_attr_store(type, stack, out_offset, ocean_attr);
     return;
   }
 
