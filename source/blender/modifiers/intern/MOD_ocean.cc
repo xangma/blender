@@ -2247,10 +2247,12 @@ struct OceanCameraLODSettings {
   float2 domain_min = float2(0.0f, 0.0f);
   float2 domain_max = float2(0.0f, 0.0f);
   float full_spectrum_radius = 0.0f;
+  float foam_carrier_cell_size = 0.0f;
   float visible_footprint_guard = 0.0f;
   float2 center = float2(0.0f, 0.0f);
   OceanLODObservableTolerances tolerances;
   bool full_domain_dense = false;
+  bool protect_foam_carrier = false;
   const char *error_message = nullptr;
   OceanLODRelevantFootprint visible_footprint;
   OceanCameraProjectionSet projection_set;
@@ -3192,6 +3194,13 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       continue;
     }
 
+    /* Foam and spray are corner attributes, so guarded visible regions need a carrier mesh fine
+     * enough to sample them at the configured dense resolution. */
+    if (settings.protect_foam_carrier && leaf.cell_size > settings.foam_carrier_cell_size) {
+      ocean_camera_lod_append_leaf_children(leaf, pending);
+      continue;
+    }
+
     const bool spectrum_ok = ocean_camera_lod_leaf_spectrum_within_resolvable_bound(
         moment_levels, settings, leaf, leaf_region_min, leaf_region_max);
     if (!spectrum_ok) {
@@ -3321,6 +3330,9 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   settings.full_spectrum_radius = (omd->lod_camera_full_spectrum_radius > 0.0f) ?
                                       omd->lod_camera_full_spectrum_radius :
                                       (2.0f * dense_cell_size);
+  settings.protect_foam_carrier =
+      (omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0;
+  settings.foam_carrier_cell_size = dense_cell_size;
 
   Scene *scene = (ctx != nullptr) ? DEG_get_input_scene(ctx->depsgraph) : nullptr;
   Object *camera = (scene != nullptr && scene->camera != nullptr) ?
