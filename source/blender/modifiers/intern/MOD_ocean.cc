@@ -3195,9 +3195,8 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       continue;
     }
 
-    /* When foam/spray have to ride on mesh corner attributes, guarded visible regions need a
-     * dense enough carrier. Cycles render LOD samples foam/spray as ocean field textures instead,
-     * so geometry should stay governed by geometric error there. */
+    /* Foam/spray are still material-visible mesh attributes, so guarded visible regions need a
+     * dense enough carrier even when Cycles can sample ocean field textures. */
     if (settings.protect_foam_carrier && leaf.cell_size > settings.foam_carrier_cell_size) {
       ocean_camera_lod_append_leaf_children(leaf, pending);
       continue;
@@ -3334,10 +3333,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
                                       (2.0f * dense_cell_size);
   const bool has_foam_spray_attributes =
       (omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0;
-  const bool cycles_field_foam_spray =
-      has_foam_spray_attributes && settings.usage_mode != MOD_OCEAN_LOD_USAGE_STEREO_DATASET &&
-      ocean_camera_lod_uses_cycles_shading(ctx);
-  settings.protect_foam_carrier = has_foam_spray_attributes && !cycles_field_foam_spray;
+  settings.protect_foam_carrier = has_foam_spray_attributes;
   settings.foam_carrier_cell_size = dense_cell_size;
 
   Scene *scene = (ctx != nullptr) ? DEG_get_input_scene(ctx->depsgraph) : nullptr;
