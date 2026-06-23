@@ -87,6 +87,7 @@ static constexpr const char *OCEAN_ATTR_CAMERA_LOD_LEAF_LEVEL = "ocean_camera_lo
 static constexpr const char *OCEAN_ATTR_CAMERA_LOD_LEAF_SPLIT_LEVEL =
     "ocean_camera_lod_leaf_split_level";
 static constexpr const char *OCEAN_ATTR_CAMERA_LOD_CELL_SIZE = "ocean_camera_lod_cell_size";
+static constexpr const char *OCEAN_ATTR_COMPRESSION = "ocean_compression";
 static constexpr const char *OCEAN_PROP_CAMERA_LOD_CONTRACT = "ocean_camera_lod_contract";
 static constexpr const char *OCEAN_PROP_CAMERA_LOD_LAYOUT = "ocean_camera_lod_layout";
 static constexpr const char *OCEAN_CAMERA_LOD_CONTRACT_ADAPTIVE_LEAF = "adaptive_leaf_v1";
@@ -3194,8 +3195,9 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
       continue;
     }
 
-    /* Foam and spray are corner attributes, so guarded visible regions need a carrier mesh fine
-     * enough to sample them at the configured dense resolution. */
+    /* When foam/spray have to ride on mesh corner attributes, guarded visible regions need a
+     * dense enough carrier. Cycles render LOD samples foam/spray as ocean field textures instead,
+     * so geometry should stay governed by geometric error there. */
     if (settings.protect_foam_carrier && leaf.cell_size > settings.foam_carrier_cell_size) {
       ocean_camera_lod_append_leaf_children(leaf, pending);
       continue;
@@ -3330,8 +3332,12 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   settings.full_spectrum_radius = (omd->lod_camera_full_spectrum_radius > 0.0f) ?
                                       omd->lod_camera_full_spectrum_radius :
                                       (2.0f * dense_cell_size);
-  settings.protect_foam_carrier =
+  const bool has_foam_spray_attributes =
       (omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0;
+  const bool cycles_field_foam_spray =
+      has_foam_spray_attributes && settings.usage_mode != MOD_OCEAN_LOD_USAGE_STEREO_DATASET &&
+      ocean_camera_lod_uses_cycles_shading(ctx);
+  settings.protect_foam_carrier = has_foam_spray_attributes && !cycles_field_foam_spray;
   settings.foam_carrier_cell_size = dense_cell_size;
 
   Scene *scene = (ctx != nullptr) ? DEG_get_input_scene(ctx->depsgraph) : nullptr;
@@ -4277,10 +4283,18 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
   if (omd->flag & MOD_OCEAN_GENERATE_FOAM) {
     const double foam_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+    const bool use_cached_foam = omd->oceancache && omd->cached && !use_camera_lod;
     AttributeOwner owner = AttributeOwner::from_id(&result->id);
     bke::MutableAttributeAccessor attributes = result->attributes_for_write();
     bke::SpanAttributeWriter mloopcols = attributes.lookup_or_add_for_write_span<ColorGeometry4b>(
         BKE_attribute_calc_unique_name(owner, omd->foamlayername), bke::AttrDomain::Corner);
+    bke::SpanAttributeWriter<float> compression_attr;
+    if (!use_cached_foam) {
+      /* Live-only diagnostic used by external calibration tooling. Cached Ocean bakes store
+       * thresholded foam, not raw Jminus compression, so do not export synthesized zeros. */
+      compression_attr = attributes.lookup_or_add_for_write_span<float>(OCEAN_ATTR_COMPRESSION,
+                                                                        bke::AttrDomain::Corner);
+    }
 
     bke::SpanAttributeWriter<ColorGeometry4b> mloopcols_spray;
     if (omd->flag & MOD_OCEAN_GENERATE_SPRAY) {
@@ -4294,6 +4308,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
         const IndexRange face = faces[i];
         const int *corner_vert = &corner_verts[face.start()];
         ColorGeometry4b *mlcol = &mloopcols.span[face.start()];
+        float *compression = compression_attr ? &compression_attr.span[face.start()] : nullptr;
 
         ColorGeometry4b *mlcolspray = nullptr;
         if ((omd->flag & MOD_OCEAN_GENERATE_SPRAY) && mloopcols_spray) {
@@ -4306,7 +4321,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           const float v = OCEAN_CO(size_co_inv, vco[1]);
           float foam;
 
-          if (omd->oceancache && omd->cached && !use_camera_lod) {
+          if (use_cached_foam) {
             BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
             foam = ocr.foam;
             CLAMP(foam, 0.0f, 1.0f);
@@ -4319,6 +4334,10 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           mlcol->r = mlcol->g = mlcol->b = char(foam * 255);
           /* This needs to be set (render engine uses) */
           mlcol->a = 255;
+          if (compression != nullptr) {
+            *compression = std::max(-ocr.Jminus, 0.0f);
+            compression++;
+          }
 
           if (mlcolspray != nullptr) {
             if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
@@ -4342,6 +4361,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     }
 
     mloopcols.finish();
+    compression_attr.finish();
     mloopcols_spray.finish();
     if (profile_enabled) {
       foam_s = BLI_time_now_seconds() - foam_start;

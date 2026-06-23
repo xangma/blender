@@ -1748,6 +1748,56 @@ def assert_camera_lod_foam_and_spray_use_camera_lod_geometry():
     assert_camera_lod_foam_attribute_matches_dense_reference(use_spray=True)
 
 
+def assert_ocean_compression_attribute_exports_live_foam_signal():
+    clear_scene()
+    obj = make_ocean_object(
+        name="OceanCompressionAttribute",
+        geometry_mode="GENERATE",
+        resolution=6,
+        spatial_size=128,
+        size=1.0,
+        camera_lod=False,
+        time_value=1.0,
+        choppiness=1.8,
+        wind_velocity=37.04,
+        wave_scale=18.0,
+        smallest_wave=0.02,
+        seed=11,
+    )
+    mod = obj.modifiers["Ocean"]
+    mod.use_foam = True
+    mod.foam_layer_name = "foam"
+    mod.foam_coverage = 0.0
+    bpy.context.view_layer.update()
+
+    depsgraph = bpy.context.evaluated_depsgraph_get()
+    obj_eval = obj.evaluated_get(depsgraph)
+    mesh_eval = obj_eval.to_mesh()
+
+    try:
+        attr = mesh_eval.attributes.get("ocean_compression")
+        assert attr is not None, "Live foam evaluation should export ocean_compression"
+        assert attr.domain == "CORNER", (
+            f"ocean_compression must be corner-domain, got {attr.domain}"
+        )
+        assert attr.data_type == "FLOAT", (
+            f"ocean_compression must be a float attribute, got {attr.data_type}"
+        )
+
+        values = [float(item.value) for item in attr.data]
+        assert len(values) == len(mesh_eval.loops), (
+            f"ocean_compression should have one value per corner; "
+            f"got {len(values)} values for {len(mesh_eval.loops)} loops"
+        )
+        assert values, "ocean_compression should contain samples"
+        assert all(math.isfinite(value) and value >= 0.0 for value in values), (
+            "ocean_compression should export finite positive compression magnitudes"
+        )
+        assert max(values) > 0.0, "ocean_compression should preserve non-zero Jminus compression"
+    finally:
+        obj_eval.to_mesh_clear()
+
+
 def assert_camera_lod_foam_spray_fac_and_bump_usage_matches_dense():
     for attribute_name in ("foam", "spray"):
         clear_scene()
@@ -2432,6 +2482,7 @@ def main():
     assert_camera_lod_conservative_visibility_coverage()
     assert_camera_lod_repeat_tiles_cover_visible_domain()
     assert_camera_lod_repeat_tiles_edge_cases()
+    assert_ocean_compression_attribute_exports_live_foam_signal()
     assert_camera_lod_foam_and_spray_use_camera_lod_geometry()
     assert_camera_lod_foam_spray_fac_and_bump_usage_matches_dense()
     assert_camera_lod_multiple_attribute_users_match_dense()
