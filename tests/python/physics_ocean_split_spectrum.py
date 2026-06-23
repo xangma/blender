@@ -1898,9 +1898,8 @@ def assert_camera_lod_large_foam_spray_profile_bounds():
         f"Large foam/spray profile case must exercise a larger dense ocean; "
         f"lod={(lod_verts, lod_faces)}, dense={(dense_verts, dense_faces)}"
     )
-    assert lod_verts < dense_verts and lod_faces < dense_faces, (
-        f"Large foam/spray profile case must keep some LOD reduction while preserving the "
-        f"visible foam/spray carrier; "
+    assert lod_verts < dense_verts * 0.75 and lod_faces < dense_faces * 0.75, (
+        f"Large foam/spray profile case must keep reduced LOD geometry; "
         f"lod={(lod_verts, lod_faces)}, dense={(dense_verts, dense_faces)}"
     )
 
