@@ -665,7 +665,7 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
         kobject.ocean_split_cell_size_z[level] =
             (level < mesh->ocean_split_cell_size_z.size()) ? mesh->ocean_split_cell_size_z[level] : 0.0f;
         const ImageHandle &handle = mesh->ocean_split_slope_images[level];
-        kobject.ocean_split_slope_texture_slots[level] = handle.empty() ? -1 : handle.svm_slot();
+        kobject.ocean_split_slope_texture_slots[level] = handle.empty() ? -1 : handle.kernel_id();
         kobject.ocean_split_cumulative_slope_moments[level] =
             (level < mesh->ocean_split_cumulative_slope_moments.size()) ?
                 mesh->ocean_split_cumulative_slope_moments[level] :
@@ -678,9 +678,9 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
                                              mesh->ocean_split_slope_images_post[level] :
                                              ImageHandle();
         kobject.ocean_split_slope_texture_slots_pre[level] = pre_handle.empty() ? -1 :
-                                                                 pre_handle.svm_slot();
+                                                                 pre_handle.kernel_id();
         kobject.ocean_split_slope_texture_slots_post[level] = post_handle.empty() ? -1 :
-                                                                  post_handle.svm_slot();
+                                                                  post_handle.kernel_id();
         kobject.ocean_split_cumulative_slope_moments_pre[level] =
             (level < mesh->ocean_split_cumulative_slope_moments_pre.size()) ?
                 mesh->ocean_split_cumulative_slope_moments_pre[level] :
@@ -695,24 +695,24 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
     if (!mesh->ocean_foam_image.empty() && !mesh->ocean_foam_attribute.empty()) {
       kobject.ocean_foam_attribute_id = scene->shader_manager->get_attribute_id(
           mesh->ocean_foam_attribute);
-      kobject.ocean_foam_texture_slot = mesh->ocean_foam_image.svm_slot();
+      kobject.ocean_foam_texture_slot = mesh->ocean_foam_image.kernel_id();
       kobject.ocean_foam_texture_slot_pre = mesh->ocean_foam_image_pre.empty() ?
                                                 -1 :
-                                                mesh->ocean_foam_image_pre.svm_slot();
+                                                mesh->ocean_foam_image_pre.kernel_id();
       kobject.ocean_foam_texture_slot_post = mesh->ocean_foam_image_post.empty() ?
                                                  -1 :
-                                                 mesh->ocean_foam_image_post.svm_slot();
+                                                 mesh->ocean_foam_image_post.kernel_id();
     }
     if (!mesh->ocean_spray_image.empty() && !mesh->ocean_spray_attribute.empty()) {
       kobject.ocean_spray_attribute_id = scene->shader_manager->get_attribute_id(
           mesh->ocean_spray_attribute);
-      kobject.ocean_spray_texture_slot = mesh->ocean_spray_image.svm_slot();
+      kobject.ocean_spray_texture_slot = mesh->ocean_spray_image.kernel_id();
       kobject.ocean_spray_texture_slot_pre = mesh->ocean_spray_image_pre.empty() ?
                                                  -1 :
-                                                 mesh->ocean_spray_image_pre.svm_slot();
+                                                 mesh->ocean_spray_image_pre.kernel_id();
       kobject.ocean_spray_texture_slot_post = mesh->ocean_spray_image_post.empty() ?
                                                   -1 :
-                                                  mesh->ocean_spray_image_post.svm_slot();
+                                                  mesh->ocean_spray_image_post.kernel_id();
     }
   }
 

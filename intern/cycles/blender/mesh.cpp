@@ -90,7 +90,9 @@ class BlenderOceanSplitSlopeLoader : public ImageLoader {
   {
   }
 
-  bool load_metadata(ImageMetaData &metadata) override
+  bool load_metadata(ImageMetaData &metadata,
+                     const ImageLoaderParams & /*params*/,
+                     Progress & /*progress*/) override
   {
     metadata.type = IMAGE_DATA_TYPE_FLOAT4;
     metadata.channels = 4;
@@ -194,7 +196,9 @@ class BlenderOceanFoamSprayLoader : public ImageLoader {
   {
   }
 
-  bool load_metadata(ImageMetaData &metadata) override
+  bool load_metadata(ImageMetaData &metadata,
+                     const ImageLoaderParams & /*params*/,
+                     Progress & /*progress*/) override
   {
     metadata.type = IMAGE_DATA_TYPE_FLOAT4;
     metadata.channels = 4;
@@ -1610,7 +1614,7 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
         sync_split_resources_s,
         tag_update_s,
         source_verts,
-        mesh->get_verts().size(),
+        mesh->num_verts(),
         mesh->num_triangles(),
         mesh->ocean_split_slope_images.size(),
         int(rebuild));
@@ -1713,24 +1717,10 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
       if (topology_changed ||
           memcmp(mP, attr_P->data<packed_float3>(), sizeof(packed_float3) * attr_numverts) == 0)
       {
-        if (need_ocean_motion_resources && b_verts_num == numverts) {
-          if (motion_step > 0) {
-            const float3 *P = mesh->get_verts().data();
-            const packed_normal *N = (attr_N) ? attr_N->data_normal() : nullptr;
-            for (int step = 0; step < motion_step; step++) {
-              std::copy_n(P, numverts, attr_mP->data_float3() + step * numverts);
-              if (attr_mN && N != nullptr) {
-                std::copy_n(N, numverts, attr_mN->data_normal() + step * numverts);
-              }
-            }
-          }
-        }
-        else if (b_verts_num != numverts) {
+        /* No mesh deformation. Ocean motion resources are synced below; geometry motion storage
+         * stays on Blender 5.2's ATTR_STD_POSITION/ATTR_STD_VERTEX_NORMAL motion steps. */
+        if (topology_changed) {
           LOG_WARNING << "Topology differs, disabling motion blur for object " << ob_name;
-          attributes.remove(ATTR_STD_MOTION_VERTEX_POSITION);
-          if (attr_mN) {
-            attributes.remove(ATTR_STD_MOTION_VERTEX_NORMAL);
-          }
         }
         else {
           LOG_TRACE << "No actual deformation motion for object " << ob_name;
@@ -1764,24 +1754,6 @@ void BlenderSync::sync_mesh_motion(BObjectInfo &b_ob_info, Mesh *mesh, const int
   }
 
   if (!b_mesh) {
-    AttributeSet &attributes = mesh->get_subdivision_type() == Mesh::SUBDIVISION_NONE ?
-                                   mesh->attributes :
-                                   mesh->subd_attributes;
-    if (need_ocean_motion_resources && !attributes.find(ATTR_STD_MOTION_VERTEX_POSITION)) {
-      Attribute *attr_mP = attributes.add(ATTR_STD_MOTION_VERTEX_POSITION);
-      Attribute *attr_N = attributes.find(ATTR_STD_VERTEX_NORMAL);
-      Attribute *attr_mN = (attr_N != nullptr) ? attributes.add(ATTR_STD_MOTION_VERTEX_NORMAL) :
-                                                 nullptr;
-      const float3 *P = mesh->get_verts().data();
-      const packed_normal *N = (attr_N != nullptr) ? attr_N->data_normal() : nullptr;
-      for (int step = 0; step < mesh->get_motion_steps() - 1; step++) {
-        std::copy_n(P, numverts, attr_mP->data_float3() + step * numverts);
-        if (attr_mN != nullptr && N != nullptr) {
-          std::copy_n(N, numverts, attr_mN->data_normal() + step * numverts);
-        }
-      }
-    }
-
     /* No deformation on this frame, copy coordinates if other frames did have it. */
     mesh->copy_center_to_motion_step(motion_step);
   }

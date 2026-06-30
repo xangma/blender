@@ -45,6 +45,7 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
   const double stage_start = profile_enabled ? time_dt() : 0.0;
   /* Count. */
   size_t tri_size = 0;
+  size_t vert_size = 0;
 
   size_t curve_size = 0;
   size_t curve_segment_size = 0;
@@ -57,11 +58,13 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
   for (Geometry *geom : scene->geometry) {
     if (geom->is_mesh() || geom->is_volume()) {
       Mesh *mesh = static_cast<Mesh *>(geom);
+      const size_t mesh_vert_size = mesh->num_verts();
 
+      vert_size += mesh_vert_size;
       tri_size += mesh->num_triangles();
       if (mesh_is_ocean_profile_target(mesh)) {
         ocean_mesh_count++;
-        ocean_vert_size += mesh->verts.size();
+        ocean_vert_size += mesh_vert_size;
         ocean_tri_size += mesh->num_triangles();
       }
     }
@@ -113,8 +116,8 @@ void GeometryManager::device_update_mesh(Device * /*unused*/,
                    << "' stage=cycles_device_update_mesh_pack mode="
                    << (mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference")
                    << " pack_s=" << (time_dt() - mesh_pack_start) << " verts="
-                   << mesh->verts.size() << " tris=" << mesh->num_triangles() << " copy_all="
-                   << int(copy_all_data) << " verts_modified=" << int(mesh->verts_is_modified())
+                   << mesh->num_verts() << " tris=" << mesh->num_triangles()
+                   << " copy_all=" << int(copy_all_data)
                    << " triangles_modified=" << int(mesh->triangles_is_modified())
                    << " shader_modified=" << int(mesh->shader_is_modified());
         }

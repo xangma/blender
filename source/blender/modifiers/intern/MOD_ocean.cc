@@ -879,7 +879,8 @@ static bool ocean_camera_lod_has_stereo_dataset_views(const Scene *scene)
          BKE_scene_multiview_is_stereo3d(&scene->r);
 }
 
-static OceanCameraProjectionSet ocean_camera_projection_set_init(const Scene *scene,
+static OceanCameraProjectionSet ocean_camera_projection_set_init(const Main &bmain,
+                                                                 const Scene *scene,
                                                                  const Object *object,
                                                                  const Object *camera,
                                                                  const int usage_mode)
@@ -896,7 +897,7 @@ static OceanCameraProjectionSet ocean_camera_projection_set_init(const Scene *sc
 
   auto append_projection = [&](const char *view_name) {
     const Object *view_camera = BKE_camera_multiview_render(
-        scene, const_cast<Object *>(camera), view_name);
+        bmain, scene, const_cast<Object *>(camera), view_name);
     if (view_camera == nullptr) {
       view_camera = camera;
     }
@@ -3357,8 +3358,9 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
 
   const double projection_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
   if (ctx != nullptr) {
+    const Main *bmain = DEG_get_bmain(ctx->depsgraph);
     settings.projection_set = ocean_camera_projection_set_init(
-        scene, ctx->object, camera, settings.usage_mode);
+        *bmain, scene, ctx->object, camera, settings.usage_mode);
     for (const OceanCameraProjection &projection : settings.projection_set.projections) {
       OceanLODRelevantFootprint footprint;
       if (ocean_camera_projection_visible_footprint(projection, domain_min, domain_max, footprint)) {

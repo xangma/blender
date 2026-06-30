@@ -7,6 +7,7 @@
 #include "kernel/geom/attribute.h"
 #include "kernel/geom/object.h"
 #include "kernel/geom/primitive.h"
+#include "kernel/image.h"
 #include "kernel/util/differential.h"
 
 CCL_NAMESPACE_BEGIN
@@ -22,6 +23,16 @@ ccl_device_inline const ccl_global KernelObject *ocean_split_object_data(
     KernelGlobals kg, const ccl_private ShaderData *sd)
 {
   return &kernel_data_fetch(objects, sd->object);
+}
+
+ccl_device_inline float4 ocean_split_image_interp(KernelGlobals kg,
+                                                  const ccl_private ShaderData *sd,
+                                                  const int slot,
+                                                  const float u,
+                                                  const float v)
+{
+  return kernel_image_interp(
+      kg, const_cast<ccl_private ShaderData *>(sd), slot, dual2(make_float2(u, v)));
 }
 
 ccl_device_inline int ocean_split_level_resolution_x(const ccl_global KernelObject *kobject,
@@ -292,7 +303,7 @@ ccl_device_inline bool ocean_split_geometry_normal_canonical(
     return false;
   }
 
-  const float3 normal = primitive_surface_attribute<float3>(kg, sd, desc).val;
+  const float3 normal = primitive_surface_attribute<float3>(kg, sd, desc);
   if (is_zero(normal)) {
     return false;
   }
@@ -336,14 +347,18 @@ ccl_device_inline bool ocean_split_ref_coord(KernelGlobals kg,
     return false;
   }
 
-  const dual3 ref_coord = primitive_surface_attribute<float3>(
-      kg, sd, desc, r_drefdx != nullptr, r_drefdy != nullptr);
-  *r_ref_coord = ref_coord.val;
-  if (r_drefdx != nullptr) {
-    *r_drefdx = ref_coord.dx;
+  if (r_drefdx != nullptr || r_drefdy != nullptr) {
+    const dual3 ref_coord = primitive_surface_attribute<dual3>(kg, sd, desc);
+    *r_ref_coord = ref_coord.val;
+    if (r_drefdx != nullptr) {
+      *r_drefdx = ref_coord.dx;
+    }
+    if (r_drefdy != nullptr) {
+      *r_drefdy = ref_coord.dy;
+    }
   }
-  if (r_drefdy != nullptr) {
-    *r_drefdy = ref_coord.dy;
+  else {
+    *r_ref_coord = primitive_surface_attribute<float3>(kg, sd, desc);
   }
   return true;
 }
@@ -357,7 +372,7 @@ ccl_device_inline bool ocean_split_ref_uv(KernelGlobals kg,
     return false;
   }
 
-  *r_ref_uv = primitive_surface_attribute<float2>(kg, sd, desc).val;
+  *r_ref_uv = primitive_surface_attribute<float2>(kg, sd, desc);
   return true;
 }
 
@@ -369,7 +384,7 @@ ccl_device_inline bool ocean_split_geometry_support_covariance(
     return false;
   }
 
-  const float3 covariance = primitive_surface_attribute<float3>(kg, sd, desc).val;
+  const float3 covariance = primitive_surface_attribute<float3>(kg, sd, desc);
   *r_covariance = ocean_split_covariance_project_psd(
       make_float3(fmaxf(covariance.x, 0.0f), covariance.y, fmaxf(covariance.z, 0.0f)));
   return true;
@@ -470,6 +485,7 @@ ccl_device_inline float ocean_split_wrap_fraction(const float value)
 
 ccl_device_inline float4 ocean_split_sample_legacy_corner_attribute(
     KernelGlobals kg,
+    const ccl_private ShaderData *sd,
     const int slot,
     const float2 ref_uv,
     const int resolution_x,
@@ -489,10 +505,10 @@ ccl_device_inline float4 ocean_split_sample_legacy_corner_attribute(
   const float sample_v0 = (float(iy0) + 0.5f) / float(resolution_y);
   const float sample_v1 = (float(iy1) + 0.5f) / float(resolution_y);
 
-  const float4 v00 = kernel_image_interp(kg, slot, sample_u0, sample_v0);
-  const float4 v10 = kernel_image_interp(kg, slot, sample_u1, sample_v0);
-  const float4 v11 = kernel_image_interp(kg, slot, sample_u1, sample_v1);
-  const float4 v01 = kernel_image_interp(kg, slot, sample_u0, sample_v1);
+  const float4 v00 = ocean_split_image_interp(kg, sd, slot, sample_u0, sample_v0);
+  const float4 v10 = ocean_split_image_interp(kg, sd, slot, sample_u1, sample_v0);
+  const float4 v11 = ocean_split_image_interp(kg, sd, slot, sample_u1, sample_v1);
+  const float4 v01 = ocean_split_image_interp(kg, sd, slot, sample_u0, sample_v1);
 
   /* Dense Ocean foam/spray is stored on quad corners and rendered through Blender's
    * standard 0-1-2 / 0-2-3 quad tessellation. */
@@ -551,14 +567,14 @@ ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
   }
 
   const float4 value0 = ocean_split_sample_legacy_corner_attribute(
-      kg, slot0, ref_uv, resolution_x, resolution_y);
+      kg, sd, slot0, ref_uv, resolution_x, resolution_y);
   if (slot1 < 0 || slot1 == slot0) {
     *r_value = value0;
     return true;
   }
 
   const float4 value1 = ocean_split_sample_legacy_corner_attribute(
-      kg, slot1, ref_uv, resolution_x, resolution_y);
+      kg, sd, slot1, ref_uv, resolution_x, resolution_y);
   *r_value = value0 + t * (value1 - value0);
   return true;
 }
@@ -575,6 +591,7 @@ ccl_device_inline float2 ocean_split_normal_sample_to_slope(const float4 sample)
 
 ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
     KernelGlobals kg,
+    const ccl_private ShaderData *sd,
     const int slot,
     const float2 uv,
     const float3 residual_covariance,
@@ -595,14 +612,14 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
   float minor_variance, major_variance;
   ocean_split_covariance_eigenvalues(texel_covariance, &minor_variance, &major_variance);
   if (major_variance <= 1.0e-8f) {
-    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = ocean_split_image_interp(kg, sd, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
   const float determinant = texel_covariance.x * texel_covariance.z -
                             texel_covariance.y * texel_covariance.y;
   if (determinant <= 1.0e-10f) {
-    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = ocean_split_image_interp(kg, sd, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
@@ -621,7 +638,7 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
                                          sqrtf(fmaxf(texel_covariance.z, 0.0f))))));
 
   if (radius_x == 0 && radius_y == 0) {
-    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = ocean_split_image_interp(kg, sd, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
 
@@ -645,14 +662,14 @@ ccl_device_inline float2 ocean_split_sample_slope_anisotropic(
 
       const float sample_u = uv.x + (float(offset_x) / float(max(1, resolution_x)));
       const float sample_v = uv.y + (float(offset_y) / float(max(1, resolution_y)));
-      const float4 sample = kernel_image_interp(kg, slot, sample_u, sample_v);
+      const float4 sample = ocean_split_image_interp(kg, sd, slot, sample_u, sample_v);
       value_sum += weight * ocean_split_normal_sample_to_slope(sample);
       weight_sum += weight;
     }
   }
 
   if (weight_sum <= 1.0e-8f) {
-    const float4 sample = kernel_image_interp(kg, slot, uv.x, uv.y);
+    const float4 sample = ocean_split_image_interp(kg, sd, slot, uv.x, uv.y);
     return ocean_split_normal_sample_to_slope(sample);
   }
   return value_sum / weight_sum;
@@ -725,6 +742,7 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
   }
 
   const float2 slope0 = ocean_split_sample_slope_anisotropic(kg,
+                                                             sd,
                                                              slot0,
                                                              ref_uv,
                                                              residual_covariance,
@@ -737,6 +755,7 @@ ccl_device_inline bool ocean_split_visible_slope(KernelGlobals kg,
                                                              ocean_split_level_cell_size_z(
                                                                  kobject, level_index));
   const float2 slope1 = ocean_split_sample_slope_anisotropic(kg,
+                                                             sd,
                                                              slot1,
                                                              ref_uv,
                                                              residual_covariance,
