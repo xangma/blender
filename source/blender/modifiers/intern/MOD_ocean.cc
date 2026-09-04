@@ -90,6 +90,9 @@ static constexpr const char *OCEAN_ATTR_CAMERA_LOD_CELL_SIZE = "ocean_camera_lod
 static constexpr const char *OCEAN_ATTR_COMPRESSION = "ocean_compression";
 static constexpr const char *OCEAN_PROP_CAMERA_LOD_CONTRACT = "ocean_camera_lod_contract";
 static constexpr const char *OCEAN_PROP_CAMERA_LOD_LAYOUT = "ocean_camera_lod_layout";
+static constexpr const char *OCEAN_PROP_CAMERA_LOD_POLICY = "ocean_camera_lod_policy";
+static constexpr const char *OCEAN_PROP_CAMERA_LOD_MIN_WAVE_PIXELS =
+    "ocean_camera_lod_min_wave_pixels";
 static constexpr const char *OCEAN_CAMERA_LOD_CONTRACT_ADAPTIVE_LEAF = "adaptive_leaf_v1";
 static constexpr const char *OCEAN_CAMERA_LOD_LAYOUT_ADAPTIVE_LEAF = "adaptive_leaf";
 static constexpr const char *OCEAN_SPLIT_DEBUG_ENV = "BLENDER_OCEAN_SPLIT_DEBUG";
@@ -127,6 +130,36 @@ static void ocean_camera_lod_set_mesh_string_property(Mesh &mesh,
   if (IDP_GetPropertyFromGroup(properties, name) == nullptr) {
     IDP_AddToGroup(properties, blender::bke::idprop::create(name, value).release());
   }
+}
+
+static void ocean_camera_lod_set_mesh_float_property(Mesh &mesh,
+                                                     const char *name,
+                                                     const float value)
+{
+  IDProperty *properties = IDP_EnsureProperties(&mesh.id);
+  if (properties == nullptr) {
+    return;
+  }
+
+  IDProperty *property = IDP_GetPropertyTypeFromGroup(properties, name, IDP_FLOAT);
+  if (property != nullptr) {
+    IDP_float_set(property, value);
+    return;
+  }
+
+  IDP_ReplaceInGroup(properties, blender::bke::idprop::create(name, value).release());
+}
+
+static void ocean_camera_lod_set_mesh_policy_properties(Mesh &mesh,
+                                                        const int policy,
+                                                        const float min_wave_pixels)
+{
+  ocean_camera_lod_set_mesh_string_property(
+      mesh,
+      OCEAN_PROP_CAMERA_LOD_POLICY,
+      policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES ? "RECOVERABLE_WAVES" : "PIXEL_ERROR");
+  ocean_camera_lod_set_mesh_float_property(
+      mesh, OCEAN_PROP_CAMERA_LOD_MIN_WAVE_PIXELS, min_wave_pixels);
 }
 
 static void init_cache_data(Object *ob, OceanModifierData *omd, const int resolution)
@@ -383,6 +416,13 @@ static int ocean_camera_lod_usage_mode(const OceanModifierData *omd)
   return (omd != nullptr && omd->lod_usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET) ?
              MOD_OCEAN_LOD_USAGE_STEREO_DATASET :
              MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
+}
+
+static int ocean_camera_lod_policy(const OceanModifierData *omd)
+{
+  return (omd != nullptr && omd->lod_policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES) ?
+             MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES :
+             MOD_OCEAN_LOD_POLICY_PIXEL_ERROR;
 }
 
 static bool ocean_camera_projection_pixel(const OceanCameraProjection &projection,
@@ -1300,9 +1340,7 @@ static float ocean_camera_projection_pixel_sensitivity(const OceanCameraProjecti
 }
 
 static float ocean_camera_projection_planar_pixel_sensitivity(
-    const OceanCameraProjection &projection,
-    const float3 &point_object,
-    const float offset_m)
+    const OceanCameraProjection &projection, const float3 &point_object, const float offset_m)
 {
   if (offset_m <= 1.0e-6f) {
     return 0.0f;
@@ -1327,6 +1365,80 @@ static float ocean_camera_projection_planar_pixel_sensitivity(
     sensitivity = std::max(sensitivity, len_v2v2(base_pixel, offset_pixel) / offset_m);
   }
   return sensitivity;
+}
+
+static float ocean_camera_projection_planar_pixel_sensitivity_upper_bound(
+    const OceanCameraProjection &projection, const Span<float2> polygon)
+{
+  const float viewplane_width = projection.params.viewplane.xmax -
+                                projection.params.viewplane.xmin;
+  const float viewplane_height = projection.params.viewplane.ymax -
+                                 projection.params.viewplane.ymin;
+  if (polygon.is_empty() || projection.winx <= 0 || projection.winy <= 0 ||
+      fabsf(viewplane_width) <= 1.0e-12f || fabsf(viewplane_height) <= 1.0e-12f)
+  {
+    return 0.0f;
+  }
+
+  const float pixel_scale_x = float(projection.winx) / viewplane_width;
+  const float pixel_scale_y = float(projection.winy) / viewplane_height;
+  if (projection.params.is_ortho) {
+    const float j00 = pixel_scale_x * projection.object_to_camera[0][0];
+    const float j01 = pixel_scale_x * projection.object_to_camera[1][0];
+    const float j10 = pixel_scale_y * projection.object_to_camera[0][1];
+    const float j11 = pixel_scale_y * projection.object_to_camera[1][1];
+
+    /* Largest singular value of the exact 2x2 Jacobian from ocean-plane meters to image pixels.
+     * Using only the two column norms can underestimate diagonal wave directions by sqrt(2). */
+    const float gram_00 = (j00 * j00) + (j10 * j10);
+    const float gram_01 = (j00 * j01) + (j10 * j11);
+    const float gram_11 = (j01 * j01) + (j11 * j11);
+    const float discriminant = sqrtf(
+        std::max(square_f(gram_00 - gram_11) + (4.0f * gram_01 * gram_01), 0.0f));
+    const float sigma_max = sqrtf(std::max(0.5f * (gram_00 + gram_11 + discriminant), 0.0f));
+    return isfinite(sigma_max) ? sigma_max : FLT_MAX;
+  }
+
+  float min_depth = FLT_MAX;
+  float max_abs_numerator[2][2] = {};
+  for (const float2 &coord : polygon) {
+    const float point_object[3] = {coord.x, coord.y, 0.0f};
+    float point_camera[3];
+    mul_v3_m4v3(point_camera, projection.object_to_camera, point_object);
+    const float depth = -point_camera[2];
+    if (depth <= 1.0e-8f || !isfinite(depth)) {
+      return FLT_MAX;
+    }
+    min_depth = std::min(min_depth, depth);
+
+    for (int camera_axis = 0; camera_axis < 2; camera_axis++) {
+      for (int object_axis = 0; object_axis < 2; object_axis++) {
+        const float d_axis = projection.object_to_camera[object_axis][camera_axis];
+        const float d_z = projection.object_to_camera[object_axis][2];
+        const float numerator = (d_axis * depth) + (point_camera[camera_axis] * d_z);
+        max_abs_numerator[camera_axis][object_axis] = std::max(
+            max_abs_numerator[camera_axis][object_axis], fabsf(numerator));
+      }
+    }
+  }
+
+  /* Perspective depth and every quotient-rule numerator are affine over the clipped ocean-plane
+   * polygon. Their minimum/maximum therefore occurs at a vertex. Bounding every Jacobian entry
+   * by its maximum absolute numerator divided by the square of the minimum positive depth, then
+   * taking the Frobenius norm, is a conservative upper bound on sigma_max everywhere in the
+   * region. This avoids missing an interior direction that crosses a dyadic LOD cutoff. */
+  const float scale = fabsf(projection.params.clip_start) / square_f(min_depth);
+  float frobenius_squared = 0.0f;
+  for (int camera_axis = 0; camera_axis < 2; camera_axis++) {
+    const float pixel_scale = (camera_axis == 0) ? pixel_scale_x : pixel_scale_y;
+    for (int object_axis = 0; object_axis < 2; object_axis++) {
+      const float entry_bound = pixel_scale * scale *
+                                max_abs_numerator[camera_axis][object_axis];
+      frobenius_squared += square_f(entry_bound);
+    }
+  }
+  const float sensitivity_bound = sqrtf(std::max(frobenius_squared, 0.0f));
+  return isfinite(sensitivity_bound) ? sensitivity_bound : FLT_MAX;
 }
 
 static bool ocean_split_debug_enabled()
@@ -1708,6 +1820,16 @@ static void required_data_mask(ModifierData * /*md*/, CustomData_MeshMasks * /*r
 struct OceanCameraLODSettings;
 static bool ocean_camera_lod_uses_dense_generate_fast_path(const OceanCameraLODSettings &settings);
 
+struct OceanCameraLODProjectionCacheKey {
+  int winx = 0;
+  int winy = 0;
+  bool is_ortho = false;
+  float clip_start = 0.0f;
+  float viewplane[4] = {};
+  float object_to_camera[4][4] = {};
+  float camera_to_object[4][4] = {};
+};
+
 struct OceanCameraLODMeshCacheKey {
   int frame = 0;
   int resolution = 0;
@@ -1726,6 +1848,7 @@ struct OceanCameraLODMeshCacheKey {
   int lod_levels = 0;
   int lod_usage_mode = 0;
   int lod_validation_mode = 0;
+  int lod_policy = 0;
   int camera_type = 0;
   int camera_stereo_convergence_mode = 0;
   float wind_velocity = 0.0f;
@@ -1747,6 +1870,7 @@ struct OceanCameraLODMeshCacheKey {
   float foam_fade = 0.0f;
   float lod_pixel_error = 0.0f;
   float lod_camera_full_spectrum_radius = 0.0f;
+  float lod_min_wave_pixels = 0.0f;
   float camera_lens = 0.0f;
   float camera_sensor_x = 0.0f;
   float camera_sensor_y = 0.0f;
@@ -1759,6 +1883,7 @@ struct OceanCameraLODMeshCacheKey {
   float camera_convergence_distance = 0.0f;
   float object_matrix[4][4] = {};
   float camera_matrix[4][4] = {};
+  Vector<OceanCameraLODProjectionCacheKey> projections;
 };
 
 struct OceanModifierRuntimeData {
@@ -2022,7 +2147,33 @@ static OceanModifierData *ocean_modifier_cache_owner(ModifierData *md, const Mod
 static bool ocean_camera_lod_cache_keys_equal(const OceanCameraLODMeshCacheKey &a,
                                               const OceanCameraLODMeshCacheKey &b)
 {
-  return a.frame == b.frame && a.resolution == b.resolution &&
+  const auto projections_equal = [&]() {
+    if (a.projections.size() != b.projections.size()) {
+      return false;
+    }
+    for (const int index : a.projections.index_range()) {
+      const OceanCameraLODProjectionCacheKey &projection_a = a.projections[index];
+      const OceanCameraLODProjectionCacheKey &projection_b = b.projections[index];
+      if (projection_a.winx != projection_b.winx || projection_a.winy != projection_b.winy ||
+          projection_a.is_ortho != projection_b.is_ortho ||
+          projection_a.clip_start != projection_b.clip_start ||
+          std::memcmp(projection_a.viewplane,
+                      projection_b.viewplane,
+                      sizeof(projection_a.viewplane)) != 0 ||
+          std::memcmp(projection_a.object_to_camera,
+                      projection_b.object_to_camera,
+                      sizeof(projection_a.object_to_camera)) != 0 ||
+          std::memcmp(projection_a.camera_to_object,
+                      projection_b.camera_to_object,
+                      sizeof(projection_a.camera_to_object)) != 0)
+      {
+        return false;
+      }
+    }
+    return true;
+  };
+
+  return projections_equal() && a.frame == b.frame && a.resolution == b.resolution &&
          a.scene_resolution_x == b.scene_resolution_x &&
          a.scene_resolution_y == b.scene_resolution_y && a.scene_scemode == b.scene_scemode &&
          a.scene_views_format == b.scene_views_format &&
@@ -2031,7 +2182,7 @@ static bool ocean_camera_lod_cache_keys_equal(const OceanCameraLODMeshCacheKey &
          a.spectrum == b.spectrum && a.seed == b.seed && a.flag == b.flag &&
          a.geometry_mode == b.geometry_mode && a.lod_levels == b.lod_levels &&
          a.lod_usage_mode == b.lod_usage_mode && a.lod_validation_mode == b.lod_validation_mode &&
-         a.camera_type == b.camera_type &&
+         a.lod_policy == b.lod_policy && a.camera_type == b.camera_type &&
          a.camera_stereo_convergence_mode == b.camera_stereo_convergence_mode &&
          a.wind_velocity == b.wind_velocity && a.damp == b.damp &&
          a.smallest_wave == b.smallest_wave && a.depth == b.depth &&
@@ -2043,10 +2194,11 @@ static bool ocean_camera_lod_cache_keys_equal(const OceanCameraLODMeshCacheKey &
          a.realsea_dvar == b.realsea_dvar && a.size == b.size &&
          a.foam_fade == b.foam_fade && a.lod_pixel_error == b.lod_pixel_error &&
          a.lod_camera_full_spectrum_radius == b.lod_camera_full_spectrum_radius &&
-         a.camera_lens == b.camera_lens && a.camera_sensor_x == b.camera_sensor_x &&
-         a.camera_sensor_y == b.camera_sensor_y && a.camera_shiftx == b.camera_shiftx &&
-         a.camera_shifty == b.camera_shifty && a.camera_clip_start == b.camera_clip_start &&
-         a.camera_clip_end == b.camera_clip_end && a.camera_ortho_scale == b.camera_ortho_scale &&
+         a.lod_min_wave_pixels == b.lod_min_wave_pixels && a.camera_lens == b.camera_lens &&
+         a.camera_sensor_x == b.camera_sensor_x && a.camera_sensor_y == b.camera_sensor_y &&
+         a.camera_shiftx == b.camera_shiftx && a.camera_shifty == b.camera_shifty &&
+         a.camera_clip_start == b.camera_clip_start && a.camera_clip_end == b.camera_clip_end &&
+         a.camera_ortho_scale == b.camera_ortho_scale &&
          a.camera_interocular_distance == b.camera_interocular_distance &&
          a.camera_convergence_distance == b.camera_convergence_distance &&
          std::memcmp(a.object_matrix, b.object_matrix, sizeof(a.object_matrix)) == 0 &&
@@ -2089,6 +2241,7 @@ static bool ocean_camera_lod_cache_key_init(const ModifierEvalContext *ctx,
   r_key.lod_levels = omd->lod_levels;
   r_key.lod_usage_mode = omd->lod_usage_mode;
   r_key.lod_validation_mode = omd->lod_validation_mode;
+  r_key.lod_policy = omd->lod_policy;
   r_key.wind_velocity = omd->wind_velocity;
   r_key.damp = omd->damp;
   r_key.smallest_wave = omd->smallest_wave;
@@ -2108,6 +2261,7 @@ static bool ocean_camera_lod_cache_key_init(const ModifierEvalContext *ctx,
   r_key.foam_fade = omd->foam_fade;
   r_key.lod_pixel_error = omd->lod_pixel_error;
   r_key.lod_camera_full_spectrum_radius = omd->lod_camera_full_spectrum_radius;
+  r_key.lod_min_wave_pixels = omd->lod_min_wave_pixels;
   copy_m4_m4(r_key.object_matrix, ctx->object->object_to_world().ptr());
   copy_m4_m4(r_key.camera_matrix, camera->object_to_world().ptr());
 
@@ -2127,30 +2281,45 @@ static bool ocean_camera_lod_cache_key_init(const ModifierEvalContext *ctx,
     r_key.camera_stereo_convergence_mode = camera_data->stereo.convergence_mode;
   }
 
+  const Main *bmain = DEG_get_bmain(ctx->depsgraph);
+  if (bmain != nullptr) {
+    const OceanCameraProjectionSet projection_set = ocean_camera_projection_set_init(
+        *bmain, scene, ctx->object, camera, ocean_camera_lod_usage_mode(omd));
+    r_key.projections.reserve(projection_set.projections.size());
+    for (const OceanCameraProjection &projection : projection_set.projections) {
+      OceanCameraLODProjectionCacheKey projection_key{};
+      projection_key.winx = projection.winx;
+      projection_key.winy = projection.winy;
+      projection_key.is_ortho = projection.params.is_ortho;
+      projection_key.clip_start = projection.params.clip_start;
+      projection_key.viewplane[0] = projection.params.viewplane.xmin;
+      projection_key.viewplane[1] = projection.params.viewplane.xmax;
+      projection_key.viewplane[2] = projection.params.viewplane.ymin;
+      projection_key.viewplane[3] = projection.params.viewplane.ymax;
+      copy_m4_m4(projection_key.object_to_camera, projection.object_to_camera);
+      copy_m4_m4(projection_key.camera_to_object, projection.camera_to_object);
+      r_key.projections.append(projection_key);
+    }
+  }
+
   return true;
 }
 
 static bool ocean_camera_lod_topology_cache_key_init(const ModifierEvalContext *ctx,
                                                      const OceanModifierData *omd,
                                                      const int resolution,
+                                                     const int frame,
                                                      OceanCameraLODMeshCacheKey &r_key)
 {
-  if (!ocean_camera_lod_cache_key_init(ctx, omd, resolution, 0, r_key)) {
+  if (!ocean_camera_lod_cache_key_init(ctx, omd, resolution, frame, r_key)) {
     return false;
   }
-
-  r_key.frame = 0;
-  r_key.time = 0.0f;
   return true;
 }
 
-static bool ocean_camera_lod_topology_cache_keys_equal(OceanCameraLODMeshCacheKey a,
-                                                       OceanCameraLODMeshCacheKey b)
+static bool ocean_camera_lod_topology_cache_keys_equal(const OceanCameraLODMeshCacheKey &a,
+                                                       const OceanCameraLODMeshCacheKey &b)
 {
-  a.frame = 0;
-  b.frame = 0;
-  a.time = 0.0f;
-  b.time = 0.0f;
   return ocean_camera_lod_cache_keys_equal(a, b);
 }
 
@@ -2245,7 +2414,9 @@ struct OceanCameraLODSettings {
   int dense_vert_budget = 0;
   int usage_mode = MOD_OCEAN_LOD_USAGE_GENERAL_RENDER;
   int validation_mode = MOD_OCEAN_LOD_VALIDATE_CAMERA_OBSERVABLE;
+  int policy = MOD_OCEAN_LOD_POLICY_PIXEL_ERROR;
   float finest_cell_size = 0.0f;
+  float min_wave_pixels = 4.0f;
   float2 domain_min = float2(0.0f, 0.0f);
   float2 domain_max = float2(0.0f, 0.0f);
   float full_spectrum_radius = 0.0f;
@@ -2368,6 +2539,8 @@ static Mesh *generate_ocean_geometry_camera_lod_dense(
 
   Mesh *result = BKE_mesh_copy_for_eval(*runtime_data->camera_lod_dense_template);
   BKE_mesh_copy_parameters_for_eval(result, mesh_orig);
+  ocean_camera_lod_set_mesh_policy_properties(
+      *result, lod_settings.policy, lod_settings.min_wave_pixels);
   ocean_camera_lod_init_dense_mesh_metadata(
       *result, lod_settings, r_point_levels, r_point_morph_factors, r_point_radius);
   return result;
@@ -2381,7 +2554,8 @@ static void ocean_camera_lod_debug_log_settings(const OceanModifierData *omd,
   }
 
   printf(
-      "[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s center=(%.6f,%.6f) "
+      "[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s policy=%s "
+      "min_wave_pixels=%.4f center=(%.6f,%.6f) "
       "domain_min=(%.6f,%.6f) domain_max=(%.6f,%.6f) "
       "finest_cell=%.6f full_spectrum_radius=%.6f visible_guard=%.6f "
       "quadtree_levels=%d modifier_lod_levels=%d dense_cells=(%d,%d) "
@@ -2390,6 +2564,9 @@ static void ocean_camera_lod_debug_log_settings(const OceanModifierData *omd,
                                                                             "CAMERA_OBSERVABLE",
       settings.usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET ? "STEREO_DATASET" :
                                                                    "GENERAL_RENDER",
+      settings.policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES ? "RECOVERABLE_WAVES" :
+                                                                  "PIXEL_ERROR",
+      double(settings.min_wave_pixels),
       double(settings.center.x),
       double(settings.center.y),
       double(settings.domain_min.x),
@@ -2558,10 +2735,11 @@ static bool ocean_camera_lod_point_visible(const OceanCameraProjectionSet &proje
   return false;
 }
 
-static float ocean_camera_lod_region_pixel_sensitivity(const OceanCameraLODSettings &settings,
-                                                       const float2 &region_min,
-                                                       const float2 &region_max,
-                                                       const float offset_m)
+static float ocean_camera_lod_pixel_error_region_pixel_sensitivity(
+    const OceanCameraLODSettings &settings,
+    const float2 &region_min,
+    const float2 &region_max,
+    const float offset_m)
 {
   if (!settings.projection_set.valid || offset_m <= 1.0e-6f) {
     return 0.0f;
@@ -2581,15 +2759,55 @@ static float ocean_camera_lod_region_pixel_sensitivity(const OceanCameraLODSetti
     const float3 point(coord.x, coord.y, 0.0f);
     for (const OceanCameraProjection &projection : settings.projection_set.projections) {
       sensitivity = std::max(
-          sensitivity, ocean_camera_projection_planar_pixel_sensitivity(projection, point, offset_m));
+          sensitivity,
+          ocean_camera_projection_planar_pixel_sensitivity(projection, point, offset_m));
     }
   }
   return sensitivity;
 }
 
+static float ocean_camera_lod_recoverable_wave_region_pixel_sensitivity(
+    const OceanCameraLODSettings &settings, const float2 &region_min, const float2 &region_max)
+{
+  if (!settings.projection_set.valid) {
+    return 0.0f;
+  }
+
+  const float guard = std::max(settings.visible_footprint_guard, 0.0f);
+  const float2 guarded_min(std::max(region_min.x - guard, settings.domain_min.x),
+                           std::max(region_min.y - guard, settings.domain_min.y));
+  const float2 guarded_max(std::min(region_max.x + guard, settings.domain_max.x),
+                           std::min(region_max.y + guard, settings.domain_max.y));
+
+  float sensitivity = 0.0f;
+  for (const OceanCameraProjection &projection : settings.projection_set.projections) {
+    Vector<float2> polygon;
+    if (!ocean_camera_projection_region_clip_polygon(projection, region_min, region_max, polygon))
+    {
+      /* Relevance is the union of the guarded footprints, but the recoverable-wave bound must be
+       * conservative for every view in that union. A leaf that is visible only through the guard
+       * in this projection can be displaced into its image even when another eye has a directly
+       * visible flat polygon, so do not let that other eye hide this dense fallback. */
+      if (ocean_camera_projection_region_intersects(projection, guarded_min, guarded_max)) {
+        return FLT_MAX;
+      }
+      continue;
+    }
+
+    const float projection_sensitivity =
+        ocean_camera_projection_planar_pixel_sensitivity_upper_bound(projection, polygon);
+    if (projection_sensitivity <= 1.0e-8f) {
+      return FLT_MAX;
+    }
+    sensitivity = std::max(sensitivity, projection_sensitivity);
+  }
+
+  return sensitivity;
+}
+
 struct OceanCameraLODResolvableBound {
   int split_level = 0;
-  float resolvable_wavelength = 0.0f;
+  float cutoff_wavelength = 0.0f;
   float max_cell_size = FLT_MAX;
 };
 
@@ -2607,42 +2825,49 @@ static OceanCameraLODResolvableBound ocean_camera_lod_resolvable_bound(
   }
 
   const int coarsest_split_level = std::min(settings.quadtree_levels - 1,
-                                           int(moment_levels.size()) - 1);
+                                            int(moment_levels.size()) - 1);
   if (ocean_camera_lod_region_intersects_full_spectrum_anchor(settings, region_min, region_max)) {
     bound.split_level = 0;
-    bound.resolvable_wavelength = moment_levels.first().wavelength;
+    bound.cutoff_wavelength = moment_levels.first().wavelength;
     bound.max_cell_size = ocean_camera_lod_dense_cell_size(settings);
     return bound;
   }
 
   const float dense_cell_size = ocean_camera_lod_dense_cell_size(settings);
-  const float offset_m = std::max(0.25f * std::max(cell_size, dense_cell_size), 1.0e-4f);
-  const float sensitivity = ocean_camera_lod_region_pixel_sensitivity(
-      settings, region_min, region_max, offset_m);
+  const float sensitivity = [&]() {
+    if (settings.policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES) {
+      return ocean_camera_lod_recoverable_wave_region_pixel_sensitivity(
+          settings, region_min, region_max);
+    }
+    const float offset_m = std::max(0.25f * std::max(cell_size, dense_cell_size), 1.0e-4f);
+    return ocean_camera_lod_pixel_error_region_pixel_sensitivity(
+        settings, region_min, region_max, offset_m);
+  }();
   if (sensitivity <= 1.0e-8f) {
     bound.split_level = coarsest_split_level;
-    bound.resolvable_wavelength = FLT_MAX;
+    bound.cutoff_wavelength = FLT_MAX;
     bound.max_cell_size = FLT_MAX;
     return bound;
   }
 
-  const float meters_for_pixel_error = std::max(settings.tolerances.reprojection_px, 1.0e-4f) /
-                                       sensitivity;
-  const float resolvable_wavelength = std::max(2.0f * meters_for_pixel_error, 1.0e-6f);
+  const float projected_cutoff_pixels =
+      (settings.policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES) ?
+          settings.min_wave_pixels :
+          (2.0f * std::max(settings.tolerances.reprojection_px, 1.0e-4f));
+  const float cutoff_wavelength = std::max(projected_cutoff_pixels / sensitivity, 1.0e-6f);
 
   int allowed_split_level = 0;
   for (const int level_index : moment_levels.index_range()) {
-    if (moment_levels[level_index].wavelength <= resolvable_wavelength) {
+    if (moment_levels[level_index].wavelength <= cutoff_wavelength) {
       allowed_split_level = level_index;
     }
   }
 
   bound.split_level = std::min(allowed_split_level, coarsest_split_level);
-  bound.resolvable_wavelength = resolvable_wavelength;
-  /* A mesh needs at least two vertices per resolvable wavelength. The old test only checked
-   * the procedural spectrum band, so split-level 0 could still be emitted as a large polygon and
-   * blur the carrier surface in the camera footprint. */
-  bound.max_cell_size = std::max(0.5f * resolvable_wavelength, dense_cell_size);
+  bound.cutoff_wavelength = cutoff_wavelength;
+  /* Sample the carrier mesh at least twice per retained cutoff wavelength. The dense reference
+   * remains the finest available mesh when the requested cutoff is below its cell size. */
+  bound.max_cell_size = std::max(0.5f * cutoff_wavelength, dense_cell_size);
   return bound;
 }
 
@@ -3298,6 +3523,8 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
 
   OceanCameraLODSettings settings{};
   settings.usage_mode = ocean_camera_lod_usage_mode(omd);
+  settings.policy = ocean_camera_lod_policy(omd);
+  settings.min_wave_pixels = std::clamp(omd->lod_min_wave_pixels, 2.0f, 64.0f);
 
   OceanSplitRuntimeReadScope read_scope{};
   const OceanSplitRuntimeReadScope *read_scope_ptr = nullptr;
@@ -3436,11 +3663,15 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
     ocean_camera_lod_profile_logf(
         object_name,
         profile_stage ? profile_stage : "settings",
-        "mode=%s selection=%s resolution=%d total_s=%.6f projection_s=%.6f leaf_build_s=%.6f "
+        "mode=%s policy=%s min_wave_pixels=%.4f selection=%s resolution=%d total_s=%.6f "
+        "projection_s=%.6f leaf_build_s=%.6f "
         "region_stats_s=%.6f region_calls=%d region_samples=%d sample_eval_s=%.6f sample_evals=%d "
         "quadtree_levels=%d dense_budget=%d",
         settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT ? "GEOMETRY_STRICT" :
                                                                               "CAMERA_OBSERVABLE",
+        settings.policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES ? "RECOVERABLE_WAVES" :
+                                                                    "PIXEL_ERROR",
+        double(settings.min_wave_pixels),
         build_leaves ? "sampled" : "cached_topology",
         resolution,
         BLI_time_now_seconds() - profile_start,
@@ -3456,15 +3687,21 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   }
 
   if (ocean_split_debug_enabled()) {
-    printf("[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s support_center=(%.6f,%.6f) "
-           "camera_anchor=(%.6f,%.6f) settings_center=(%.6f,%.6f) min_wavelength=%.6f dense_cell=%.6f "
-           "requested_quadtree_levels=%d available_levels=%d "
-           "tolerances=(position_m=%.4f reproj_px=%.4f depth_m=%.4f normal_deg=%.4f "
-           "temporal_px=%.4f grazing_px=%.4f)\n",
+    printf(
+        "[OCEAN_CAMERA_LOD_DEBUG] Modifier camera_lod mode=%s usage=%s policy=%s "
+        "min_wave_pixels=%.4f support_center=(%.6f,%.6f) "
+        "camera_anchor=(%.6f,%.6f) settings_center=(%.6f,%.6f) min_wavelength=%.6f "
+        "dense_cell=%.6f "
+        "requested_quadtree_levels=%d available_levels=%d "
+        "tolerances=(position_m=%.4f reproj_px=%.4f depth_m=%.4f normal_deg=%.4f "
+        "temporal_px=%.4f grazing_px=%.4f)\n",
            settings.validation_mode == MOD_OCEAN_LOD_VALIDATE_GEOMETRY_STRICT ? "GEOMETRY_STRICT" :
                                                                              "CAMERA_OBSERVABLE",
            settings.usage_mode == MOD_OCEAN_LOD_USAGE_STEREO_DATASET ? "STEREO_DATASET" :
                                                                         "GENERAL_RENDER",
+        settings.policy == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES ? "RECOVERABLE_WAVES" :
+                                                                    "PIXEL_ERROR",
+        double(settings.min_wave_pixels),
            double(settings.projection_set.support_center.x),
            double(settings.projection_set.support_center.y),
            double(settings.projection_set.camera_anchor.x),
@@ -3868,6 +4105,8 @@ static Mesh *generate_ocean_geometry_camera_lod(const ModifierEvalContext *ctx,
         *result, OCEAN_PROP_CAMERA_LOD_CONTRACT, OCEAN_CAMERA_LOD_CONTRACT_ADAPTIVE_LEAF);
     ocean_camera_lod_set_mesh_string_property(
         *result, OCEAN_PROP_CAMERA_LOD_LAYOUT, OCEAN_CAMERA_LOD_LAYOUT_ADAPTIVE_LEAF);
+    ocean_camera_lod_set_mesh_policy_properties(
+        *result, lod_settings.policy, lod_settings.min_wave_pixels);
   }
 
   r_point_levels.reinitialize(positions.size());
@@ -4068,7 +4307,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     camera_lod_cache_enabled = ocean_camera_lod_cache_key_init(
         ctx, omd, resolution, cfra_scene, camera_lod_cache_key);
     camera_lod_topology_cache_enabled = ocean_camera_lod_topology_cache_key_init(
-        ctx, omd, resolution, camera_lod_topology_cache_key);
+        ctx, omd, resolution, cfra_scene, camera_lod_topology_cache_key);
     if (camera_lod_cache_enabled) {
       Mesh *cached_result = ocean_modifier_runtime_camera_lod_cache_lookup(
           *camera_lod_runtime_data, camera_lod_cache_key, mesh);
@@ -4769,6 +5008,8 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   const bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
   const bool stereo_dataset_mode = RNA_enum_get(ptr, "lod_usage_mode") ==
                                    MOD_OCEAN_LOD_USAGE_STEREO_DATASET;
+  const bool recoverable_waves_policy = RNA_enum_get(ptr, "lod_policy") ==
+                                        MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES;
   if (generate_mode && !use_camera_lod) {
     ui::Layout &sub = col.column(true);
     sub.prop(ptr, "repeat_x", UI_ITEM_NONE, IFACE_("Repeat X"), ICON_NONE);
@@ -4781,6 +5022,10 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   if (generate_mode) {
     sub.prop(ptr, "lod_levels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
     if (use_camera_lod) {
+      sub.prop(ptr, "lod_policy", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      if (recoverable_waves_policy) {
+        sub.prop(ptr, "lod_min_wave_pixels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+      }
       sub.prop(ptr, "lod_pixel_error", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       sub.prop(ptr, "lod_camera_full_spectrum_radius", UI_ITEM_NONE, std::nullopt, ICON_NONE);
       sub.prop(ptr, "lod_usage_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);

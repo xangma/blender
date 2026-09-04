@@ -8,12 +8,16 @@
 
 #define DNA_DEPRECATED_ALLOW
 
+/* Define macros in `DNA_genfile.h`. */
+#define DNA_GENFILE_VERSIONING_MACROS
+
 #include "NOD_geometry_nodes_srna.hh"
 
 #include "DNA_ID.h"
 #include "DNA_brush_types.h"
 #include "DNA_camera_types.h"
 #include "DNA_curve_types.h"
+#include "DNA_genfile.h"
 #include "DNA_mesh_types.h"
 #include "DNA_modifier_types.h"
 #include "DNA_node_tree_interface_types.h"
@@ -524,7 +528,7 @@ static void version_solid_color_width_height_defaults(Main &bmain)
   }
 }
 
-void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
+void blo_do_versions_520(FileData *fd, Library * /*lib*/, Main *bmain)
 {
   if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 1)) {
     for (Scene &scene : bmain->scenes) {
@@ -892,6 +896,31 @@ void blo_do_versions_520(FileData * /*fd*/, Library * /*lib*/, Main *bmain)
       }
     }
     FOREACH_NODETREE_END;
+  }
+
+  if (!MAIN_VERSION_FILE_ATLEAST(bmain, 502, 45)) {
+    const bool added_lod_policy = !DNA_struct_member_exists(
+        fd->filesdna, "OceanModifierData", "char", "lod_policy");
+    const bool added_lod_min_wave_pixels = !DNA_struct_member_exists(
+        fd->filesdna, "OceanModifierData", "float", "lod_min_wave_pixels");
+
+    for (Object &object : bmain->objects) {
+      for (ModifierData &md : object.modifiers) {
+        if (md.type != eModifierType_Ocean) {
+          continue;
+        }
+        OceanModifierData &omd = reinterpret_cast<OceanModifierData &>(md);
+        if (added_lod_policy || !ELEM(omd.lod_policy,
+                                      MOD_OCEAN_LOD_POLICY_PIXEL_ERROR,
+                                      MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES))
+        {
+          omd.lod_policy = MOD_OCEAN_LOD_POLICY_PIXEL_ERROR;
+        }
+        if (added_lod_min_wave_pixels || omd.lod_min_wave_pixels <= 0.0f) {
+          omd.lod_min_wave_pixels = 4.0f;
+        }
+      }
+    }
   }
 
   /**

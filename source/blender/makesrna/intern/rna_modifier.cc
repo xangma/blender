@@ -6791,6 +6791,20 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
        "and disables residual shading detail"},
       {0, nullptr, 0, nullptr, nullptr},
   };
+  static const EnumPropertyItem lod_policy_items[] = {
+      {MOD_OCEAN_LOD_POLICY_PIXEL_ERROR,
+       "PIXEL_ERROR",
+       0,
+       "Pixel Error",
+       "Choose retained wave bands and mesh density from the LOD pixel-error tolerance"},
+      {MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES,
+       "RECOVERABLE_WAVES",
+       0,
+       "Recoverable Waves",
+       "Preserve wave bands whose wavelength projects to at least the requested number of image "
+       "pixels and sample their carrier mesh at least twice per wavelength"},
+      {0, nullptr, 0, nullptr, nullptr},
+  };
 
   srna = RNA_def_struct(brna, "OceanModifier", "Modifier");
   RNA_def_struct_ui_text(srna, "Ocean Modifier", "Simulate an ocean surface");
@@ -6863,7 +6877,29 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_ui_text(
       prop,
       "LOD Pixel Error",
-      "Screen-space geometry tolerance in pixels for adaptive camera LOD leaf selection");
+      "Screen-space geometry tolerance for camera LOD safety checks; the Pixel Error policy also "
+      "uses it to choose retained wave bands and mesh density");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_policy", PROP_ENUM, PROP_NONE);
+  RNA_def_property_enum_sdna(prop, nullptr, "lod_policy");
+  RNA_def_property_enum_items(prop, lod_policy_items);
+  RNA_def_property_enum_default(prop, MOD_OCEAN_LOD_POLICY_PIXEL_ERROR);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_ui_text(
+      prop, "LOD Policy", "Choose how camera projection controls retained waves and mesh density");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
+
+  prop = RNA_def_property(srna, "lod_min_wave_pixels", PROP_FLOAT, PROP_UNSIGNED);
+  RNA_def_property_float_sdna(prop, nullptr, "lod_min_wave_pixels");
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 2.0f, 64.0f);
+  RNA_def_property_ui_range(prop, 2.0f, 16.0f, 0.5f, 2);
+  RNA_def_property_ui_text(
+      prop,
+      "Minimum Wave Pixels",
+      "Minimum projected image pixels per retained wavelength; the carrier mesh uses cells no "
+      "larger than half that cutoff wavelength");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
 
   prop = RNA_def_property(srna, "lod_camera_full_spectrum_radius", PROP_FLOAT, PROP_DISTANCE);

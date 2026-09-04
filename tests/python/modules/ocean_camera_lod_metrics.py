@@ -249,6 +249,8 @@ def make_ocean_object(name="OceanObj",
                       camera_lod=True,
                       lod_levels=4,
                       lod_pixel_error=0.5,
+                      lod_policy="PIXEL_ERROR",
+                      lod_min_wave_pixels=4.0,
                       lod_camera_full_spectrum_radius=0.0,
                       lod_usage_mode="GENERAL_RENDER",
                       lod_validation_mode="CAMERA_OBSERVABLE",
@@ -278,6 +280,10 @@ def make_ocean_object(name="OceanObj",
     mod.lod_levels = lod_levels
     if hasattr(mod, "lod_pixel_error"):
         mod.lod_pixel_error = lod_pixel_error
+    if hasattr(mod, "lod_policy"):
+        mod.lod_policy = lod_policy
+    if hasattr(mod, "lod_min_wave_pixels"):
+        mod.lod_min_wave_pixels = lod_min_wave_pixels
     if hasattr(mod, "lod_camera_full_spectrum_radius"):
         mod.lod_camera_full_spectrum_radius = lod_camera_full_spectrum_radius
     if hasattr(mod, "lod_usage_mode"):

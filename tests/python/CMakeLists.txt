@@ -673,6 +673,11 @@ if(TEST_SRC_DIR_EXISTS)
 
   if(WITH_MOD_OCEANSIM AND WITH_CYCLES)
     add_blender_test(
+      physics_ocean_camera_lod_policy
+      --python ${TEST_PYTHON_DIR}/physics_ocean_camera_lod_policy.py
+    )
+
+    add_blender_test(
       physics_ocean_split_spectrum
       --python ${TEST_PYTHON_DIR}/physics_ocean_split_spectrum.py
     )
