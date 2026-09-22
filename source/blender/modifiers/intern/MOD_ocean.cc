@@ -13,6 +13,24 @@
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
+#include <atomic>
+#include <cstdint>
+#include <ctime>
+#include <functional>
+#include <thread>
+#include <mutex>
+#ifdef _WIN32
+#  include <process.h>
+#  include <windows.h>
+#  define GETPID _getpid
+#elif defined(__APPLE__)
+#  include <mach/mach_time.h>
+#  include <unistd.h>
+#  define GETPID getpid
+#else
+#  include <unistd.h>
+#  define GETPID getpid
+#endif
 
 #include "BLI_color_types.hh"
 #include "BLI_math_base.h"
@@ -98,6 +116,98 @@ static constexpr const char *OCEAN_CAMERA_LOD_LAYOUT_ADAPTIVE_LEAF = "adaptive_l
 static constexpr const char *OCEAN_SPLIT_DEBUG_ENV = "BLENDER_OCEAN_SPLIT_DEBUG";
 static constexpr const char *OCEAN_CAMERA_LOD_PROFILE_ENV = "BLENDER_OCEAN_CAMERA_LOD_PROFILE";
 static constexpr const char *OCEAN_LOD_POSITION_TOL_ENV = "BLENDER_OCEAN_LOD_POSITION_TOL_M";
+
+/* Optional cross-process scopes.  Kept local and dependency-free so normal
+ * Blender builds incur no work unless the evaluation runner opts in. */
+static const char *ocean_event_path()
+{
+  const char *path = std::getenv("STEREOOCEAN_EVENTS_PATH");
+  return path && path[0] ? path : nullptr;
+}
+
+static uint64_t ocean_event_clock_ns()
+{
+#if defined(_WIN32)
+  static LARGE_INTEGER frequency = [] { LARGE_INTEGER value; QueryPerformanceFrequency(&value); return value; }();
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  return uint64_t((1000000000.0 * double(now.QuadPart)) / double(frequency.QuadPart));
+#elif defined(__APPLE__)
+  static mach_timebase_info_data_t timebase = [] { mach_timebase_info_data_t value{}; mach_timebase_info(&value); return value; }();
+  return uint64_t((mach_absolute_time() * uint64_t(timebase.numer)) / uint64_t(timebase.denom));
+#else
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return uint64_t(ts.tv_sec) * 1000000000ULL + uint64_t(ts.tv_nsec);
+#endif
+}
+
+static const char *ocean_event_env(const char *name)
+{
+  const char *value = std::getenv(name);
+  if (!value || !value[0]) {
+    return "";
+  }
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p; p++) {
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+          *p == '_' || *p == '-' || *p == '.' || *p == ':')) {
+      return "";
+    }
+  }
+  return value;
+}
+
+class OceanEvaluationScope {
+ public:
+  explicit OceanEvaluationScope(const char *name) : name_(name)
+  {
+    if (ocean_event_path()) {
+      id_ = ++next_id_;
+      start_ = ocean_event_clock_ns();
+    }
+  }
+  ~OceanEvaluationScope()
+  {
+    const char *path = ocean_event_path();
+    if (!path || !id_) {
+      return;
+    }
+    if (FILE *file = std::fopen(path, "a")) {
+      std::lock_guard<std::mutex> guard(event_write_mutex);
+      const uint64_t end = ocean_event_clock_ns();
+      std::fprintf(file,
+                   "{\"schema_version\":1,\"type\":\"span\",\"name\":\"%s\","
+                   "\"ts_ns\":%llu,\"duration_ns\":%llu,\"pid\":%u,\"tid\":%llu,\"host\":\"%s\","
+                   "\"span_id\":\"native-blender-%u-%llu\",\"parent_id\":null,"
+                   "\"outcome\":\"pass\",\"context\":{\"source\":\"blender\","
+                   "\"clock\":\"python_monotonic_ns\",\"case_id\":\"%s\","
+                   "\"state_id\":\"%s\",\"variant\":\"%s\",\"attempt_id\":\"%s\"}}\n",
+                   name_,
+                   static_cast<unsigned long long>(start_),
+                   static_cast<unsigned long long>(end - start_),
+                   static_cast<unsigned int>(GETPID()),
+                   static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                   ocean_event_env("HOSTNAME"),
+                   static_cast<unsigned int>(GETPID()),
+                   static_cast<unsigned long long>(id_),
+                   ocean_event_env("STEREOOCEAN_CASE_ID"),
+                   ocean_event_env("STEREOOCEAN_STATE_ID"),
+                   ocean_event_env("STEREOOCEAN_VARIANT"),
+                   ocean_event_env("STEREOOCEAN_ATTEMPT_ID"));
+      std::fclose(file);
+    }
+  }
+
+ private:
+  const char *name_;
+  uint64_t start_;
+  uint64_t id_ = 0;
+  static std::mutex event_write_mutex;
+  static std::atomic<uint64_t> next_id_;
+};
+
+std::atomic<uint64_t> OceanEvaluationScope::next_id_{0};
+std::mutex OceanEvaluationScope::event_write_mutex;
 static constexpr const char *OCEAN_LOD_REPROJ_TOL_ENV = "BLENDER_OCEAN_LOD_REPROJ_TOL_PX";
 static constexpr const char *OCEAN_LOD_DEPTH_TOL_ENV = "BLENDER_OCEAN_LOD_DEPTH_TOL_M";
 static constexpr const char *OCEAN_LOD_NORMAL_TOL_ENV = "BLENDER_OCEAN_LOD_NORMAL_TOL_DEG";
@@ -4238,6 +4348,7 @@ static Mesh *ocean_modifier_runtime_camera_lod_cache_lookup(
 
 static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mesh)
 {
+  OceanEvaluationScope evaluation_scope("ocean.modifier");
   OceanModifierData *omd = (OceanModifierData *)md;
   if (omd->ocean && !BKE_ocean_is_valid(omd->ocean)) {
     BKE_modifier_set_error(ctx->object, md, "Failed to allocate memory");
@@ -4309,6 +4420,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     camera_lod_topology_cache_enabled = ocean_camera_lod_topology_cache_key_init(
         ctx, omd, resolution, cfra_scene, camera_lod_topology_cache_key);
     if (camera_lod_cache_enabled) {
+      OceanEvaluationScope cache_scope("ocean.topology_cache.lookup");
       Mesh *cached_result = ocean_modifier_runtime_camera_lod_cache_lookup(
           *camera_lod_runtime_data, camera_lod_cache_key, mesh);
       if (cached_result != nullptr) {
@@ -4332,20 +4444,23 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
   /* do ocean simulation */
   const double simulation_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-  if (omd->cached && !use_camera_lod) {
-    if (!omd->oceancache) {
-      init_cache_data(ob, omd, resolution);
+  {
+    OceanEvaluationScope simulation_scope("ocean.simulation");
+    if (omd->cached && !use_camera_lod) {
+      if (!omd->oceancache) {
+        init_cache_data(ob, omd, resolution);
+      }
+      BKE_ocean_simulate_cache(omd->oceancache, cfra_scene);
     }
-    BKE_ocean_simulate_cache(omd->oceancache, cfra_scene);
-  }
-  else {
-    /* omd->ocean is nullptr on an original object (in contrast to an evaluated one).
-     * We can create a new one, but we have to free it as well once we're done.
-     * This function is only called on an original object when applying the modifier
-     * using the 'Apply Modifier' button, and thus it is not called frequently for
-     * simulation. */
-    allocated_ocean |= BKE_ocean_ensure(omd, resolution);
-    simulate_ocean_modifier(omd);
+    else {
+      /* omd->ocean is nullptr on an original object (in contrast to an evaluated one).
+       * We can create a new one, but we have to free it as well once we're done.
+       * This function is only called on an original object when applying the modifier
+       * using the 'Apply Modifier' button, and thus it is not called frequently for
+       * simulation. */
+      allocated_ocean |= BKE_ocean_ensure(omd, resolution);
+      simulate_ocean_modifier(omd);
+    }
   }
   if (profile_enabled) {
     simulation_s = BLI_time_now_seconds() - simulation_start;
@@ -4376,6 +4491,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   }
 
   if (omd->geometry_mode == MOD_OCEAN_GEOM_GENERATE) {
+    OceanEvaluationScope geometry_scope("ocean.geometry_generate");
     const double geometry_generate_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     if (use_camera_lod) {
       if (!camera_lod_settings.projection_set.valid) {
@@ -4455,6 +4571,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     }
   }
   else if (omd->geometry_mode == MOD_OCEAN_GEOM_DISPLACE) {
+    OceanEvaluationScope displacement_scope("ocean.geometry_displace");
     const double geometry_generate_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     result = (Mesh *)BKE_id_copy_ex(nullptr, &mesh->id, nullptr, LIB_ID_COPY_LOCALIZE);
     if (profile_enabled) {
@@ -4494,6 +4611,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   bke::SpanAttributeWriter<float> camera_lod_radius_attr;
 
   if (use_camera_lod) {
+    OceanEvaluationScope support_scope("ocean.support_prepare");
     const double support_prepare_local_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     geometry_supports = use_camera_lod_mesh ?
                            Array<OceanSplitSupport>(result->verts_num) :
@@ -4523,6 +4641,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   /* Add vertex-colors before displacement: allows lookup based on position. */
 
   if (omd->flag & MOD_OCEAN_GENERATE_FOAM) {
+    OceanEvaluationScope attributes_scope("ocean.attributes_foam");
     const double foam_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     const bool use_cached_foam = omd->oceancache && omd->cached && !use_camera_lod;
     AttributeOwner owner = AttributeOwner::from_id(&result->id);
@@ -4610,6 +4729,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   }
 
   if (use_camera_lod) {
+    OceanEvaluationScope attribute_scope("ocean.attributes_export");
     const double support_prepare_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     bke::MutableAttributeAccessor attributes = result->attributes_for_write();
     ref_coord_attr = attributes.lookup_or_add_for_write_only_span<float3>(OCEAN_ATTR_REF_COORD,
@@ -4640,6 +4760,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   /* NOTE: tried to parallelized that one and previous foam loop,
    * but gives 20% slower results... odd. */
   {
+    OceanEvaluationScope displacement_scope("ocean.displacement");
     const double displacement_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     const int verts_num = result->verts_num;
     OceanSplitRuntimeReadScope split_read_scope{};

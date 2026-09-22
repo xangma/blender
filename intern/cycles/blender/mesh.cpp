@@ -6,7 +6,26 @@
 #include <cstdarg>
 #include <cstdlib>
 #include <cstring>
+#include <cstdio>
 #include <optional>
+#include <atomic>
+#include <cstdint>
+#include <ctime>
+#include <functional>
+#include <thread>
+#include <mutex>
+#ifdef _WIN32
+#  include <process.h>
+#  include <windows.h>
+#  define GETPID _getpid
+#elif defined(__APPLE__)
+#  include <mach/mach_time.h>
+#  include <unistd.h>
+#  define GETPID getpid
+#else
+#  include <unistd.h>
+#  define GETPID getpid
+#endif
 
 #include "blender/attribute_convert.h"
 #include "blender/session.h"
@@ -49,6 +68,38 @@ static bool ocean_camera_lod_profile_enabled()
   return value != nullptr && value[0] != '\0' && value[0] != '0';
 }
 
+static uint64_t ocean_event_clock_ns()
+{
+#if defined(_WIN32)
+  static LARGE_INTEGER frequency = [] { LARGE_INTEGER value; QueryPerformanceFrequency(&value); return value; }();
+  LARGE_INTEGER now;
+  QueryPerformanceCounter(&now);
+  return uint64_t((1000000000.0 * double(now.QuadPart)) / double(frequency.QuadPart));
+#elif defined(__APPLE__)
+  static mach_timebase_info_data_t timebase = [] { mach_timebase_info_data_t value{}; mach_timebase_info(&value); return value; }();
+  return uint64_t((mach_absolute_time() * uint64_t(timebase.numer)) / uint64_t(timebase.denom));
+#else
+  timespec ts{};
+  clock_gettime(CLOCK_MONOTONIC, &ts);
+  return uint64_t(ts.tv_sec) * 1000000000ULL + uint64_t(ts.tv_nsec);
+#endif
+}
+
+static const char *ocean_event_env(const char *name)
+{
+  const char *value = std::getenv(name);
+  if (!value || !value[0]) {
+    return "";
+  }
+  for (const unsigned char *p = reinterpret_cast<const unsigned char *>(value); *p; p++) {
+    if (!((*p >= 'a' && *p <= 'z') || (*p >= 'A' && *p <= 'Z') || (*p >= '0' && *p <= '9') ||
+          *p == '_' || *p == '-' || *p == '.' || *p == ':')) {
+      return "";
+    }
+  }
+  return value;
+}
+
 static void ocean_camera_lod_profile_logv(const char *object_name,
                                           const char *stage,
                                           const char *fmt,
@@ -76,6 +127,58 @@ static void ocean_camera_lod_profile_logf(const char *object_name,
   ocean_camera_lod_profile_logv(object_name, stage, fmt, args);
   va_end(args);
 }
+
+class OceanEvaluationScope {
+ public:
+  explicit OceanEvaluationScope(const char *name) : name_(name)
+  {
+    if (std::getenv("STEREOOCEAN_EVENTS_PATH")) {
+      id_ = ++next_id_;
+      start_ = ocean_event_clock_ns();
+    }
+  }
+  ~OceanEvaluationScope()
+  {
+    const char *path = std::getenv("STEREOOCEAN_EVENTS_PATH");
+    if (!path || !path[0] || !id_) {
+      return;
+    }
+    if (FILE *file = std::fopen(path, "a")) {
+      std::lock_guard<std::mutex> guard(event_write_mutex);
+      const uint64_t end = ocean_event_clock_ns();
+      std::fprintf(file,
+                   "{\"schema_version\":1,\"type\":\"span\",\"name\":\"%s\","
+                   "\"ts_ns\":%llu,\"duration_ns\":%llu,\"pid\":%u,\"tid\":%llu,\"host\":\"%s\","
+                   "\"span_id\":\"native-cycles-%u-%llu\",\"parent_id\":null,"
+                   "\"outcome\":\"pass\",\"context\":{\"source\":\"cycles\","
+                   "\"clock\":\"python_monotonic_ns\",\"case_id\":\"%s\","
+                   "\"state_id\":\"%s\",\"variant\":\"%s\",\"attempt_id\":\"%s\"}}\n",
+                   name_,
+                   static_cast<unsigned long long>(start_),
+                   static_cast<unsigned long long>(end - start_),
+                   static_cast<unsigned int>(GETPID()),
+                   static_cast<unsigned long long>(std::hash<std::thread::id>{}(std::this_thread::get_id())),
+                   ocean_event_env("HOSTNAME"),
+                   static_cast<unsigned int>(GETPID()),
+                   static_cast<unsigned long long>(id_),
+                   ocean_event_env("STEREOOCEAN_CASE_ID"),
+                   ocean_event_env("STEREOOCEAN_STATE_ID"),
+                   ocean_event_env("STEREOOCEAN_VARIANT"),
+                   ocean_event_env("STEREOOCEAN_ATTEMPT_ID"));
+      std::fclose(file);
+    }
+  }
+
+ private:
+  const char *name_;
+  uint64_t start_;
+  uint64_t id_ = 0;
+  static std::mutex event_write_mutex;
+  static std::atomic<uint64_t> next_id_;
+};
+
+std::atomic<uint64_t> OceanEvaluationScope::next_id_{0};
+std::mutex OceanEvaluationScope::event_write_mutex;
 
 class BlenderOceanSplitSlopeLoader : public ImageLoader {
  public:
@@ -1471,6 +1574,7 @@ static void create_subd_mesh(Scene *scene,
 
 void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 {
+  OceanEvaluationScope evaluation_scope("cycles.sync_mesh");
   const blender::OceanModifierData *ocean_omd = blender_object_ocean_split_modifier(b_ob_info);
   const bool profile_ocean = ocean_camera_lod_profile_enabled() && ocean_omd != nullptr;
   const string object_name = BKE_id_name(b_ob_info.real_object->id);
@@ -1581,7 +1685,10 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
   mesh->attributes.update(std::move(new_mesh.attributes));
   mesh->subd_attributes.update(std::move(new_mesh.subd_attributes));
   const double sync_split_resources_start = profile_ocean ? time_dt() : 0.0;
-  sync_ocean_split_resources(scene, b_ob_info, mesh);
+  {
+    OceanEvaluationScope split_scope("cycles.ocean.sync_split_resources");
+    sync_ocean_split_resources(scene, b_ob_info, mesh);
+  }
   if (profile_ocean) {
     sync_split_resources_s = time_dt() - sync_split_resources_start;
   }
@@ -1596,7 +1703,10 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
                        (mesh->subd_face_corners_is_modified());
 
   const double tag_update_start = profile_ocean ? time_dt() : 0.0;
-  mesh->tag_update(scene, rebuild);
+  {
+    OceanEvaluationScope update_scope("cycles.mesh.tag_update");
+    mesh->tag_update(scene, rebuild);
+  }
   if (profile_ocean) {
     tag_update_s = time_dt() - tag_update_start;
     ocean_camera_lod_profile_logf(
