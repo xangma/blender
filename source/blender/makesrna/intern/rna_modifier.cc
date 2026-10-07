@@ -6786,9 +6786,9 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
       {MOD_OCEAN_LOD_USAGE_STEREO_DATASET,
        "STEREO_DATASET",
        0,
-       "Stereo Dataset",
-       "Geometry-first stereo-pair mode that validates one explicit mesh against the stereo union "
-       "and disables residual shading detail"},
+       "Geometry Supervision",
+       "Validate one explicit ocean surface across both stereo views for images and geometry "
+       "outputs; disable rendering-only surface detail"},
       {0, nullptr, 0, nullptr, nullptr},
   };
   static const EnumPropertyItem lod_policy_items[] = {
@@ -6919,8 +6919,8 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(prop,
                            "LOD Usage",
-                           "Choose between the general render path and a geometry-first stereo "
-                           "dataset path");
+                           "Choose general rendering or geometry supervision using one explicit "
+                           "ocean surface for images and geometry outputs");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_dependency_update");
 
   prop = RNA_def_property(srna, "lod_validation_mode", PROP_ENUM, PROP_NONE);

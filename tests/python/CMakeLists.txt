@@ -683,6 +683,15 @@ if(TEST_SRC_DIR_EXISTS)
     )
 
     add_blender_test(
+      physics_ocean_camera_lod_supervised_foam
+      --python ${TEST_PYTHON_DIR}/ocean_camera_lod_supervised_foam.py
+      --
+      --outdir ${TEST_OUT_DIR}/ocean_camera_lod_supervised_foam
+      --resolution 32
+      --smallest-wave 2
+    )
+
+    add_blender_test(
       physics_ocean_lod_benchmark_report
       --python ${TEST_PYTHON_DIR}/ocean_camera_lod_benchmark.py
       --

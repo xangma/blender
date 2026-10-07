@@ -423,7 +423,11 @@ static bool sync_ocean_split_runtime_step_resources(
     ImageHandle *r_foam_image,
     ImageHandle *r_spray_image)
 {
-  if (omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
+  const bool geometry_supervision =
+      omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET;
+  if (geometry_supervision) {
+    /* Foam/spray only color the shared explicit surface. Keep residual slope resources empty,
+     * while retaining base field dimensions independently of the residual level count. */
     if (r_slope_images != nullptr) {
       r_slope_images->clear();
     }
@@ -448,11 +452,18 @@ static bool sync_ocean_split_runtime_step_resources(
     if (r_spray_image != nullptr) {
       r_spray_image->clear();
     }
-    return false;
+    if (r_min_wavelength != nullptr) {
+      *r_min_wavelength = 0.0f;
+    }
+    r_slope_images = nullptr;
+    r_cumulative_slope_moments = nullptr;
+    r_min_wavelength = nullptr;
+    r_cell_size_x = nullptr;
+    r_cell_size_z = nullptr;
   }
 
   const int level_count = std::min(BKE_ocean_split_level_count_get(omd->ocean),
-                                   OCEAN_SPLIT_MAX_LEVELS);
+                                  geometry_supervision ? 1 : OCEAN_SPLIT_MAX_LEVELS);
   if (level_count <= 0) {
     if (r_slope_images != nullptr) {
       r_slope_images->clear();
@@ -629,10 +640,6 @@ static void sync_ocean_split_resources(Scene *scene, const BObjectInfo &b_ob_inf
   mesh->ocean_foam_attribute = ustring();
   mesh->ocean_spray_attribute = ustring();
   if (!omd) {
-    return;
-  }
-
-  if (omd->lod_usage_mode == blender::MOD_OCEAN_LOD_USAGE_STEREO_DATASET) {
     return;
   }
 
@@ -827,6 +834,21 @@ static void attr_create_generic(Scene *scene,
                                                       b_attr.sharing_info);
               if (is_render_color) {
                 attr->std = ATTR_STD_VERTEX_COLOR;
+              }
+              else if (is_ocean_ref_coord) {
+                attr->std = ATTR_STD_OCEAN_REF_COORD;
+              }
+              else if (is_ocean_ref_uv) {
+                attr->std = ATTR_STD_OCEAN_REF_UV;
+                if (subdivision) {
+                  attr->flags |= ATTR_SUBDIVIDE_SMOOTH_FVAR;
+                }
+              }
+              else if (is_ocean_geometry_normal) {
+                attr->std = ATTR_STD_OCEAN_GEOMETRY_NORMAL;
+              }
+              else if (is_ocean_geometry_support_covariance) {
+                attr->std = ATTR_STD_OCEAN_GEOMETRY_SUPPORT_COVARIANCE;
               }
               return;
             }
@@ -1714,7 +1736,8 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
         "cycles_sync_mesh",
         "mode=%s total_s=%.6f object_to_mesh_s=%.6f create_mesh_s=%.6f "
         "free_object_to_mesh_s=%.6f clear_non_sockets_s=%.6f sync_split_resources_s=%.6f "
-        "tag_update_s=%.6f source_verts=%d synced_verts=%zu synced_tris=%zu split_levels=%zu rebuild=%d",
+        "tag_update_s=%.6f source_verts=%d synced_verts=%zu synced_tris=%zu split_levels=%zu "
+        "foam_field=%d spray_field=%d ocean_ref_uv_std=%d rebuild=%d",
         mesh->ocean_camera_lod_active ? "camera_lod" : "dense_reference",
         time_dt() - sync_start,
         object_to_mesh_s,
@@ -1727,6 +1750,10 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
         mesh->num_verts(),
         mesh->num_triangles(),
         mesh->ocean_split_slope_images.size(),
+        int(!mesh->ocean_foam_image.empty()),
+        int(!mesh->ocean_spray_image.empty()),
+        int(mesh->attributes.find(ATTR_STD_OCEAN_REF_UV) != nullptr ||
+            mesh->subd_attributes.find(ATTR_STD_OCEAN_REF_UV) != nullptr),
         int(rebuild));
   }
 }

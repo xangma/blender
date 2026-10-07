@@ -3533,7 +3533,8 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
 
     /* When foam/spray have to ride on mesh corner attributes, guarded visible regions need a
      * dense enough carrier. Cycles render LOD samples foam/spray as ocean field textures instead,
-     * so geometry should stay governed by geometric error there. */
+     * including Geometry Supervision: these fields color the explicit surface without adding
+     * displacement or residual normals, so geometric error still governs the mesh. */
     if (settings.protect_foam_carrier && leaf.cell_size > settings.foam_carrier_cell_size) {
       ocean_camera_lod_append_leaf_children(leaf, pending);
       continue;
@@ -3673,8 +3674,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
   const bool has_foam_spray_attributes =
       (omd->flag & (MOD_OCEAN_GENERATE_FOAM | MOD_OCEAN_GENERATE_SPRAY)) != 0;
   const bool cycles_field_foam_spray =
-      has_foam_spray_attributes && settings.usage_mode != MOD_OCEAN_LOD_USAGE_STEREO_DATASET &&
-      ocean_camera_lod_uses_cycles_shading(ctx);
+      has_foam_spray_attributes && ocean_camera_lod_uses_cycles_shading(ctx);
   settings.protect_foam_carrier = has_foam_spray_attributes && !cycles_field_foam_spray;
   settings.foam_carrier_cell_size = dense_cell_size;
 
@@ -3689,7 +3689,7 @@ static OceanCameraLODSettings ocean_camera_lod_settings(const ModifierEvalContex
            !ocean_camera_lod_has_stereo_dataset_views(scene))
   {
     settings.error_message =
-        "Stereo Dataset mode requires Stereo 3D multiview with enabled left and right views; "
+        "Geometry Supervision requires Stereo 3D multiview with enabled left and right views; "
         "falling back to uniform mesh";
   }
 
@@ -5174,7 +5174,7 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
           ICON_INFO);
       if (stereo_dataset_mode) {
         warning.label(
-            RPT_("Stereo Dataset mode keeps geometry-strict validation over the stereo-eye union"),
+            RPT_("Geometry Supervision validates the explicit surface across both stereo views"),
             ICON_NONE);
       }
     }
@@ -5316,8 +5316,9 @@ static void split_panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &col = layout.column(false);
   col.active_set(use_camera_lod);
   if (stereo_dataset_mode) {
-    col.label(IFACE_("Stereo Dataset mode uses geometry-only shading for explicit stereo depth"),
-              ICON_NONE);
+    col.label(
+        IFACE_("Geometry Supervision uses one explicit surface for images and geometry outputs"),
+        ICON_NONE);
     col.label(IFACE_("The ocean_geometry_normal attribute stores the explicit mesh normal"),
               ICON_NONE);
     col.label(IFACE_("Cycles skips residual split shading detail in this mode"), ICON_NONE);

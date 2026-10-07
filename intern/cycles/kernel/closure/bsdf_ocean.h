@@ -523,7 +523,8 @@ ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
                                                    const uint64_t attr_id,
                                                    ccl_private float4 *r_value)
 {
-  if (!ocean_split_object_has_data(kg, sd) || attr_id == uint(ATTR_STD_NOT_FOUND) ||
+  /* Field attributes do not require residual normal detail on the explicit surface. */
+  if (sd->object == OBJECT_NONE || attr_id == uint(ATTR_STD_NOT_FOUND) ||
       attr_id == uint64_t(ATTR_STD_NOT_FOUND))
   {
     return false;
@@ -556,8 +557,11 @@ ccl_device_inline bool ocean_split_attribute_value(KernelGlobals kg,
   if (!ocean_split_ref_uv(kg, sd, &ref_uv)) {
     return false;
   }
-  const int resolution_x = ocean_split_level_resolution_x(kobject, 0);
-  const int resolution_y = ocean_split_level_resolution_y(kobject, 0);
+  const int resolution_x = kobject->ocean_split_resolution_x[0];
+  const int resolution_y = kobject->ocean_split_resolution_y[0];
+  if (resolution_x <= 0 || resolution_y <= 0) {
+    return false;
+  }
 
   int slot0, slot1;
   float t;

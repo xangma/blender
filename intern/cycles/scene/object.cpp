@@ -692,6 +692,13 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
       }
     }
 
+    /* The base foam/spray field can exist without residual slope levels in Geometry
+     * Supervision. Its dimensions must not be gated by ocean_split_level_count. */
+    if (!mesh->ocean_split_resolution_x.empty() && !mesh->ocean_split_resolution_y.empty()) {
+      kobject.ocean_split_resolution_x[0] = mesh->ocean_split_resolution_x[0];
+      kobject.ocean_split_resolution_y[0] = mesh->ocean_split_resolution_y[0];
+    }
+
     if (!mesh->ocean_foam_image.empty() && !mesh->ocean_foam_attribute.empty()) {
       kobject.ocean_foam_attribute_id = scene->shader_manager->get_attribute_id(
           mesh->ocean_foam_attribute);
