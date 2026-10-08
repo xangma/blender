@@ -62,6 +62,7 @@
 #include "BKE_idprop.hh"
 #include "BKE_lib_id.hh"
 #include "BKE_camera.h"
+#include "BKE_context.hh"
 #include "BKE_mesh.hh"
 #include "BKE_mesh_mapping.hh"
 #include "BKE_modifier.hh"
@@ -1996,11 +1997,20 @@ struct OceanCameraLODMeshCacheKey {
   Vector<OceanCameraLODProjectionCacheKey> projections;
 };
 
+struct OceanCameraLODEvaluationStatus {
+  bool evaluated = false;
+  bool dense = true;
+  int levels = 1;
+  const char *fallback_reason = nullptr;
+};
+
 struct OceanModifierRuntimeData {
   Mesh *camera_lod_dense_template = nullptr;
   Mesh *camera_lod_cached_result = nullptr;
   OceanCameraLODMeshCacheKey camera_lod_cached_key;
   bool camera_lod_cached_key_valid = false;
+  OceanCameraLODEvaluationStatus camera_lod_cached_status;
+  OceanCameraLODEvaluationStatus camera_lod_viewport_status;
   Mesh *camera_lod_topology_template = nullptr;
   OceanCameraLODMeshCacheKey camera_lod_topology_key;
   bool camera_lod_topology_key_valid = false;
@@ -4389,6 +4399,19 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   const int resolution = (ctx->flag & MOD_APPLY_RENDER) ? omd->resolution :
                                                           omd->viewport_resolution;
 
+  OceanCameraLODEvaluationStatus evaluation_status;
+  evaluation_status.evaluated = requested_camera_lod;
+  if (camera_lod_dense_fallback_reason != nullptr) {
+    evaluation_status.fallback_reason = omd->cached ? N_("Bake/cache uses dense geometry") :
+                                                      N_("This renderer requires dense geometry");
+  }
+  const auto publish_viewport_status = [&](const OceanCameraLODEvaluationStatus &status) {
+    if (!ocean_modifier_context_is_render(ctx) && (ctx->flag & MOD_APPLY_TO_ORIGINAL) == 0) {
+      /* Status belongs to the evaluated modifier, while geometry caches belong to the original. */
+      ocean_ensure_runtime_data(omd)->camera_lod_viewport_status = status;
+    }
+  };
+
   int cfra_for_cache;
   int i, j;
   Array<int> camera_lod_levels;
@@ -4424,6 +4447,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
       Mesh *cached_result = ocean_modifier_runtime_camera_lod_cache_lookup(
           *camera_lod_runtime_data, camera_lod_cache_key, mesh);
       if (cached_result != nullptr) {
+        publish_viewport_status(camera_lod_runtime_data->camera_lod_cached_status);
         if (profile_enabled) {
           ocean_camera_lod_profile_logf(
               object_name,
@@ -4495,6 +4519,18 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     const double geometry_generate_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
     if (use_camera_lod) {
       if (!camera_lod_settings.projection_set.valid) {
+        const Scene *scene = DEG_get_input_scene(ctx->depsgraph);
+        if (scene == nullptr || scene->camera == nullptr) {
+          evaluation_status.fallback_reason = N_("Set a scene camera");
+        }
+        else if (ocean_camera_lod_usage_mode(omd) == MOD_OCEAN_LOD_USAGE_STEREO_DATASET &&
+                 !ocean_camera_lod_has_stereo_dataset_views(scene))
+        {
+          evaluation_status.fallback_reason = N_("Enable Stereo 3D left and right views");
+        }
+        else {
+          evaluation_status.fallback_reason = N_("Camera projection is unavailable");
+        }
         BKE_modifier_set_error(
             ctx->object,
             md,
@@ -4505,8 +4541,10 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
         result = generate_ocean_geometry(omd, mesh, resolution, false);
       }
       else {
+        evaluation_status.levels = camera_lod_settings.quadtree_levels;
         camera_lod_dense_fast_path = ocean_camera_lod_uses_dense_generate_fast_path(
             camera_lod_settings);
+        evaluation_status.dense = camera_lod_dense_fast_path;
         if (camera_lod_dense_fast_path) {
           result = generate_ocean_geometry_camera_lod_dense(
               omd,
@@ -4536,6 +4574,9 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
               camera_lod_morph_factors,
               camera_lod_radii);
           if (result == nullptr) {
+            evaluation_status.dense = true;
+            evaluation_status.levels = 1;
+            evaluation_status.fallback_reason = N_("Camera LOD geometry is unavailable");
             BKE_modifier_set_error(ctx->object,
                                    md,
                                    "%s",
@@ -5027,6 +5068,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     ocean_modifier_runtime_free_camera_lod_cache(*camera_lod_runtime_data);
     camera_lod_runtime_data->camera_lod_cached_result = BKE_mesh_copy_for_eval(*result);
     camera_lod_runtime_data->camera_lod_cached_key = camera_lod_cache_key;
+    camera_lod_runtime_data->camera_lod_cached_status = evaluation_status;
     camera_lod_runtime_data->camera_lod_cached_key_valid =
         camera_lod_runtime_data->camera_lod_cached_result != nullptr;
     if (profile_enabled) {
@@ -5084,6 +5126,9 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
 #  undef OCEAN_CO
 
+  if (result != nullptr) {
+    publish_viewport_status(evaluation_status);
+  }
   return result;
 }
 #else  /* WITH_OCEANSIM */
@@ -5126,12 +5171,7 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &col = layout.column(false);
   col.prop(ptr, "geometry_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   const bool generate_mode = RNA_enum_get(ptr, "geometry_mode") == MOD_OCEAN_GEOM_GENERATE;
-  const bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
-  const bool stereo_dataset_mode = RNA_enum_get(ptr, "lod_usage_mode") ==
-                                   MOD_OCEAN_LOD_USAGE_STEREO_DATASET;
-  const bool recoverable_waves_policy = RNA_enum_get(ptr, "lod_policy") ==
-                                        MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES;
-  if (generate_mode && !use_camera_lod) {
+  if (generate_mode) {
     ui::Layout &sub = col.column(true);
     sub.prop(ptr, "repeat_x", UI_ITEM_NONE, IFACE_("Repeat X"), ICON_NONE);
     sub.prop(ptr, "repeat_y", UI_ITEM_NONE, IFACE_("Y"), ICON_NONE);
@@ -5140,21 +5180,6 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &sub = col.column(true);
   sub.prop(ptr, "viewport_resolution", UI_ITEM_NONE, IFACE_("Resolution Viewport"), ICON_NONE);
   sub.prop(ptr, "resolution", UI_ITEM_NONE, IFACE_("Render"), ICON_NONE);
-  if (generate_mode) {
-    sub.prop(ptr, "lod_levels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    if (use_camera_lod) {
-      sub.prop(ptr, "lod_policy", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      if (recoverable_waves_policy) {
-        sub.prop(ptr, "lod_min_wave_pixels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      }
-      sub.prop(ptr, "lod_pixel_error", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      sub.prop(ptr, "lod_camera_full_spectrum_radius", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      sub.prop(ptr, "lod_usage_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      if (!stereo_dataset_mode) {
-        sub.prop(ptr, "lod_validation_mode", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-      }
-    }
-  }
 
   col.prop(ptr, "time", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
@@ -5165,20 +5190,6 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
   col.prop(ptr, "random_seed", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
   col.prop(ptr, "use_normals", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  if (generate_mode) {
-    col.prop(ptr, "use_camera_lod", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    if (use_camera_lod) {
-      ui::Layout &warning = col.column(false);
-      warning.label(
-          RPT_("Camera LOD is Cycles-only for final renders; unsupported paths use dense geometry"),
-          ICON_INFO);
-      if (stereo_dataset_mode) {
-        warning.label(
-            RPT_("Geometry Supervision validates the explicit surface across both stereo views"),
-            ICON_NONE);
-      }
-    }
-  }
 
   modifier_error_message_draw(layout, ptr);
 
@@ -5302,37 +5313,111 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
   }
 }
 
-static void split_panel_draw(const bContext * /*C*/, Panel *panel)
+static void split_panel_draw_header(const bContext * /*C*/, Panel *panel)
+{
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+  const OceanModifierData *omd = static_cast<const OceanModifierData *>(ptr->data);
+  ui::Layout &row = panel->layout->row(false);
+  row.active_set(omd->geometry_mode == MOD_OCEAN_GEOM_GENERATE);
+  row.prop(ptr, "use_camera_lod", UI_ITEM_NONE, IFACE_("Camera LOD"), ICON_NONE);
+}
+
+static void camera_lod_status_draw(const bContext *C,
+                                   ui::Layout &layout,
+                                   Object *object,
+                                   OceanModifierData *omd)
+{
+  const Scene *scene = CTX_data_scene(C);
+  char label[256];
+  std::snprintf(label,
+                sizeof(label),
+                IFACE_("Scene Camera: %s"),
+                scene && scene->camera ? scene->camera->id.name + 2 : IFACE_("None"));
+  layout.label(label, ICON_CAMERA_DATA);
+
+  if (omd->geometry_mode != MOD_OCEAN_GEOM_GENERATE) {
+    layout.label(RPT_("Camera LOD is inactive in Displace mode"), ICON_INFO);
+    return;
+  }
+  if (!ocean_use_camera_lod(omd)) {
+    layout.label(RPT_("Camera LOD is disabled"), ICON_INFO);
+    return;
+  }
+  if (scene && !STREQ(scene->r.engine, RE_engine_id_CYCLES)) {
+    layout.label(RPT_("Final render uses dense mesh; select Cycles for LOD"), ICON_INFO);
+  }
+  if ((omd->modifier.mode & eModifierMode_Realtime) == 0) {
+    layout.label(RPT_("Viewport modifier is disabled"), ICON_INFO);
+    return;
+  }
+
+  /* Read the current dependency graph without scheduling simulation from a UI draw. */
+  Depsgraph *depsgraph = CTX_data_depsgraph_pointer(C);
+  Object *object_eval = DEG_get_evaluated(depsgraph, object);
+  ModifierData *modifier_eval = object_eval != object &&
+                                        DEG_id_is_fully_evaluated(depsgraph, &object_eval->id) &&
+                                        DEG_object_geometry_is_evaluated(*object_eval) ?
+                                    BKE_modifiers_findby_persistent_uid(
+                                        object_eval, omd->modifier.persistent_uid) :
+                                    nullptr;
+  const OceanModifierRuntimeData *runtime = modifier_eval &&
+                                                    modifier_eval->type == eModifierType_Ocean ?
+                                                static_cast<const OceanModifierRuntimeData *>(
+                                                    modifier_eval->runtime) :
+                                                nullptr;
+  if (runtime == nullptr || !runtime->camera_lod_viewport_status.evaluated) {
+    layout.label(RPT_("Viewport: Awaiting evaluation"), ICON_INFO);
+  }
+  else {
+    const OceanCameraLODEvaluationStatus &status = runtime->camera_lod_viewport_status;
+    std::snprintf(label, sizeof(label), IFACE_("Evaluated Viewport Levels: %d"), status.levels);
+    layout.label(label, ICON_NONE);
+    layout.label(status.dense ? RPT_("Viewport: Dense mesh") : RPT_("Viewport: Adaptive LOD"),
+                 ICON_NONE);
+    if (status.fallback_reason != nullptr) {
+      layout.label(RPT_(status.fallback_reason), ICON_INFO);
+    }
+  }
+}
+
+static void split_panel_draw(const bContext *C, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
 
-  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
-  const bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
+  PointerRNA ob_ptr;
+  PointerRNA *ptr = modifier_panel_get_property_pointers(panel, &ob_ptr);
+  OceanModifierData *omd = static_cast<OceanModifierData *>(ptr->data);
+  const bool use_camera_lod = ocean_use_camera_lod(omd);
   const bool stereo_dataset_mode = RNA_enum_get(ptr, "lod_usage_mode") ==
                                    MOD_OCEAN_LOD_USAGE_STEREO_DATASET;
 
   layout.use_property_split_set(true);
 
+  camera_lod_status_draw(C, layout, static_cast<Object *>(ob_ptr.data), omd);
+  layout.separator();
+
   ui::Layout &col = layout.column(false);
   col.active_set(use_camera_lod);
+  col.prop(ptr, "lod_policy", UI_ITEM_NONE, IFACE_("Policy"), ICON_NONE);
+  if (ocean_camera_lod_policy(omd) == MOD_OCEAN_LOD_POLICY_RECOVERABLE_WAVES) {
+    col.prop(ptr, "lod_min_wave_pixels", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  }
+  col.prop(ptr, "lod_pixel_error", UI_ITEM_NONE, IFACE_("Pixel Error"), ICON_NONE);
+  col.prop(ptr, "lod_levels", UI_ITEM_NONE, IFACE_("Maximum Levels"), ICON_NONE);
+  col.prop(ptr,
+           "lod_camera_full_spectrum_radius",
+           UI_ITEM_NONE,
+           IFACE_("Full-spectrum Radius"),
+           ICON_NONE);
+  col.label(RPT_("Radius 0 uses automatic near-camera detail"), ICON_NONE);
+  col.prop(ptr, "lod_usage_mode", UI_ITEM_NONE, IFACE_("Usage"), ICON_NONE);
   if (stereo_dataset_mode) {
-    col.label(
-        IFACE_("Geometry Supervision uses one explicit surface for images and geometry outputs"),
-        ICON_NONE);
-    col.label(IFACE_("The ocean_geometry_normal attribute stores the explicit mesh normal"),
-              ICON_NONE);
-    col.label(IFACE_("Cycles skips residual split shading detail in this mode"), ICON_NONE);
+    col.label(RPT_("Validity: Geometry Strict (required)"), ICON_NONE);
+    col.label(RPT_("Images and geometry share one surface"), ICON_NONE);
   }
   else {
-    col.label(IFACE_("Cycles reconstructs visible residual detail from the shared ocean hierarchy"),
-              ICON_NONE);
-    col.label(IFACE_("The ocean_geometry_normal attribute stores the explicit geometry-band normal"),
-              ICON_NONE);
-    col.label(IFACE_("Cycles keeps the apparent residual normal internal to shading"),
-              ICON_NONE);
-    col.label(
-        IFACE_("Other renderers use geometry-band displacement and geometry custom normals"),
-        ICON_NONE);
+    col.prop(ptr, "lod_validation_mode", UI_ITEM_NONE, IFACE_("Validity"), ICON_NONE);
+    col.label(RPT_("Cycles keeps residual shading detail"), ICON_NONE);
   }
 }
 
@@ -5346,9 +5431,9 @@ static void bake_panel_draw(const bContext * /*C*/, Panel *panel)
 
   bool is_cached = RNA_boolean_get(ptr, "is_cached");
   bool use_foam = RNA_boolean_get(ptr, "use_foam");
-  bool use_camera_lod = RNA_boolean_get(ptr, "use_camera_lod");
+  const bool use_camera_lod = ocean_use_camera_lod(static_cast<OceanModifierData *>(ptr->data));
 
-  if (use_camera_lod) {
+  if (use_camera_lod && !is_cached) {
     layout.label(IFACE_("Camera LOD uses live simulation only"), ICON_INFO);
     layout.label(IFACE_("Bake/cache is unavailable while Camera LOD is enabled"), ICON_NONE);
     return;
@@ -5396,7 +5481,7 @@ static void panel_register(ARegionType *region_type)
   modifier_subpanel_register(
       region_type, "spectrum", "Spectrum", nullptr, spectrum_panel_draw, panel_type);
   modifier_subpanel_register(
-      region_type, "split", "Camera LOD", nullptr, split_panel_draw, panel_type);
+      region_type, "split", "", split_panel_draw_header, split_panel_draw, panel_type);
   modifier_subpanel_register(region_type, "bake", "Bake", nullptr, bake_panel_draw, panel_type);
 #else
   UNUSED_VARS(panel_type);
