@@ -7154,7 +7154,6 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   prop = RNA_def_property(srna, "realsea_spread", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "realsea_dvar");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  RNA_def_property_range(prop, 0.1, 4.0);
   RNA_def_property_ui_text(
       prop, "Directional Spread", "Directional spreading divisor (dvar) for Realsea spectra");
   RNA_def_property_ui_range(prop, 0.1, 4.0, 0.1, 3);

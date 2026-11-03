@@ -196,12 +196,19 @@ def test_effective_controls(obj, modifier):
     short_fetch = height_field(obj, modifier, fetch_jonswap=500)
     long_fetch = height_field(obj, modifier, fetch_jonswap=500000)
     assert not np.array_equal(short_fetch, long_fetch)
-    # Reject a reversed finite band rather than quietly swapping the requested bounds.
-    modifier.realsea_fmin = 0.8
-    modifier.realsea_fmax = 0.2
-    bpy.context.view_layer.update()
-    evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
-    assert len(evaluated.data.vertices) == len(obj.data.vertices)
+    # The slider's usual 0.1–4 range must not silently clamp explicitly supplied widths.
+    for width in (0.05, 8.0):
+        height_field(obj, modifier, realsea_use_spread=True, realsea_spread=width)
+        assert math.isclose(modifier.realsea_spread, width, rel_tol=1e-6)
+    # Reject reversed and equal positive bounds rather than changing the requested band.
+    for lower, upper in ((0.8, 0.2), (0.2, 0.2)):
+        modifier.realsea_fmin = lower
+        modifier.realsea_fmax = upper
+        bpy.context.view_layer.update()
+        evaluated = obj.evaluated_get(bpy.context.evaluated_depsgraph_get())
+        assert len(evaluated.data.vertices) == len(obj.data.vertices)
+    # Both cutoffs may be explicitly disabled with zero.
+    height_field(obj, modifier, realsea_fmin=0.0, realsea_fmax=0.0)
 
 
 def main():

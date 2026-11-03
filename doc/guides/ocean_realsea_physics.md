@@ -59,9 +59,11 @@ multiplier; disabling it means a multiplier of one.
 - `sharpen_peak_jonswap` stores gamma divided by ten. A stored zero, the existing
   modifier DNA default, selects gamma 3.3 for RealSea. Positive values map to
   gamma in the supported range 1–6. Legacy spectra's default handling is unchanged.
-- Frequency bounds are Hz. Zero disables that bound. Finite negative or reversed
-  nonzero bounds are invalid, rather than silently reordered. Spreading width and
+- Frequency bounds are Hz. Zero disables that bound. Finite negative bounds or equal/reversed
+  positive bounds are invalid, rather than silently reordered. Spreading width and
   water depth must be positive; wind must be nonnegative, and JONSWAP fetch positive.
+  The spreading slider covers 0.1–4; explicitly entered positive widths outside
+  that usual range are preserved, with narrow lobes requiring finer angular resolution.
 - Alignment, reflected-wave damping and Smallest Wave do not affect RealSea.
   Use its frequency limits and spreading controls. Direction applies whenever
   RealSea spreading is enabled, including with legacy Alignment set to zero.
@@ -85,7 +87,7 @@ The test independently computes deep-water PM density; reconstructs modal
 coefficients from evaluated height fields at two times; predicts a third time;
 checks modal and spatial variance, opposite bins, frequency bounds and Nyquist
 axes; compares patch sizes/resolutions and angular orientations; and exercises
-gain, gamma, fetch, revision identity and rejection of reversed bounds.
+gain, gamma, fetch, revision identity and rejection of equal/reversed positive bounds.
 This is a bounded numerical regression, not field validation of every sea state.
 The historical MATLAB parity report belongs to its original revision and does
 not establish version-2 correctness.

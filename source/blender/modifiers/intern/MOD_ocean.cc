@@ -4369,14 +4369,14 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
        !std::isfinite(omd->depth) || !std::isfinite(omd->sharpen_peak_jonswap) ||
        omd->realsea_fmin < 0.0f || omd->realsea_fmax < 0.0f || omd->realsea_dvar <= 0.0f ||
        omd->wind_velocity < 0.0f || omd->depth <= 0.0f ||
-       (omd->realsea_fmax > 0.0f && omd->realsea_fmin > omd->realsea_fmax) ||
+       (omd->realsea_fmax > 0.0f && omd->realsea_fmin >= omd->realsea_fmax) ||
        (omd->spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP &&
         (!std::isfinite(omd->fetch_jonswap) || omd->fetch_jonswap <= 0.0f))))
   {
     BKE_modifier_set_error(ctx->object,
                            md,
                            "Invalid RealSea settings: require finite nonnegative frequency bounds "
-                           "with minimum <= nonzero maximum, positive spread/depth/fetch and "
+                           "with minimum < nonzero maximum, positive spread/depth/fetch and "
                            "nonnegative wind speed");
     return mesh;
   }

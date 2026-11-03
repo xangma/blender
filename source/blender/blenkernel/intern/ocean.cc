@@ -96,8 +96,10 @@ static float realsea_spread_kernel(const float s, const float dvar, const float 
 static float realsea_spread_integral(const float s, const float dvar, const int samples)
 {
   const float half_pi = float(M_PI) * 0.5f;
-  const float theta_min = -half_pi;
-  const float theta_max = half_pi;
+  /* Restrict quadrature to the nonzero support so small positive width values retain
+   * the same angular integration resolution as the normal UI range. */
+  const float theta_max = half_pi * std::min(dvar, 1.0f);
+  const float theta_min = -theta_max;
   const float dtheta = (theta_max - theta_min) / float(samples);
   float sum = 0.0f;
 
@@ -2017,7 +2019,7 @@ bool BKE_ocean_init(Ocean *o,
                       !std::isfinite(realsea_dvar) || !std::isfinite(V) || !std::isfinite(depth) ||
                       !std::isfinite(sharpen_peak_jonswap) || realsea_fmin < 0.0f ||
                       realsea_fmax < 0.0f || realsea_dvar <= 0.0f || V < 0.0f || depth <= 0.0f ||
-                      (realsea_fmax > 0.0f && realsea_fmin > realsea_fmax) ||
+                      (realsea_fmax > 0.0f && realsea_fmin >= realsea_fmax) ||
                       (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP &&
                        (!std::isfinite(fetch_jonswap) || fetch_jonswap <= 0.0f))))
   {
