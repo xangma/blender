@@ -95,7 +95,7 @@ static float realsea_spread_norm(const Ocean *oc, const float s)
   if (oc->_realsea_spread_lut == nullptr || oc->_realsea_lut_size < 2 ||
       oc->_realsea_s_max <= 0.0f)
   {
-    return 1.0f / float(M_PI);
+    return 2.0f / float(M_PI);
   }
 
   const float s_clamped = std::max(std::min(s, oc->_realsea_s_max), 0.0f);
@@ -128,6 +128,9 @@ static float realsea_directional_spread(const Ocean *oc, const float f, const fl
   cos_theta = std::min(cos_theta, 1.0f);
   const float dvar = (oc->_realsea_dvar > 0.0f) ? oc->_realsea_dvar : 1.0f;
   const float theta = acosf(cos_theta);
+  if (theta / dvar >= float(M_PI) * 0.5f) {
+    return 0.0f;
+  }
   const float cos_term = cosf(theta / dvar);
   if (cos_term <= 0.0f) {
     return 0.0f;
@@ -152,9 +155,8 @@ static float realsea_df_dk(const Ocean *oc, const float k, const float omega, co
   if (k <= 0.0f || omega <= 0.0f) {
     return 0.0f;
   }
-  const float kd = k * oc->_depth;
-  const float cosh_kd = coshf(kd);
-  const float sech2 = 1.0f / (cosh_kd * cosh_kd);
+  /* sech²(kd)=1-tanh²(kd) avoids overflow at deep-water/high-frequency limits. */
+  const float sech2 = std::max(0.0f, 1.0f - tanh_kd * tanh_kd);
   const float domega_dk = (GRAVITY * tanh_kd + GRAVITY * k * oc->_depth * sech2) /
                           (2.0f * omega);
   return domega_dk * (1.0f / (2.0f * float(M_PI)));
@@ -316,13 +318,14 @@ float BLI_ocean_spectrum_realsea_pm(const Ocean *oc, const float kx, const float
   const float ratio = fp / f;
   const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
                    expf(-1.25f * powf(ratio, 4.0f));
-  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) :
+                                                 1.0f / (2.0f * float(M_PI));
   if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 
   const float df_dk = realsea_df_dk(oc, k, omega, tanh_kd);
-  return Sf * f * spread * df_dk / k;
+  return Sf * spread * df_dk / k;
 }
 
 float BLI_ocean_spectrum_realsea_jonswap(const Ocean *oc, const float kx, const float kz)
@@ -367,15 +370,16 @@ float BLI_ocean_spectrum_realsea_jonswap(const Ocean *oc, const float kx, const 
   const float ratio = fp / f;
   const float sigma = (f <= fp) ? 0.07f : 0.09f;
   const float rj = expf(-1.0f / (2.0f * sigma * sigma) * powf((f / fp) - 1.0f, 2.0f));
-  const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) *
-                   expf(-1.25f * powf(ratio, 4.0f)) * powf(3.3f, rj);
-  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) : 1.0f;
+  const float Sf = (8.1e-3f * GRAVITY * GRAVITY) / (tau4 * f5) * expf(-1.25f * powf(ratio, 4.0f)) *
+                   powf(oc->_sharpen_peak_jonswap, rj);
+  const float spread = oc->_realsea_use_spread ? realsea_directional_spread(oc, f, kx, kz) :
+                                                 1.0f / (2.0f * float(M_PI));
   if (oc->_realsea_use_spread && spread == 0.0f) {
     return 0.0f;
   }
 
   const float df_dk = realsea_df_dk(oc, k, omega, tanh_kd);
-  return Sf * f * spread * df_dk / k;
+  return Sf * spread * df_dk / k;
 }
 
 /** \} */

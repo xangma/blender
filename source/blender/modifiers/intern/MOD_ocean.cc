@@ -10,6 +10,7 @@
 #include <cstdarg>
 #include <cfloat>
 #include <climits>
+#include <cmath>
 #include <cstdlib>
 #include <cstdio>
 #include <cstring>
@@ -4360,6 +4361,25 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 {
   OceanEvaluationScope evaluation_scope("ocean.modifier");
   OceanModifierData *omd = (OceanModifierData *)md;
+  const bool use_realsea = ELEM(
+      omd->spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP);
+  if (use_realsea &&
+      (!std::isfinite(omd->realsea_fmin) || !std::isfinite(omd->realsea_fmax) ||
+       !std::isfinite(omd->realsea_dvar) || !std::isfinite(omd->wind_velocity) ||
+       !std::isfinite(omd->depth) || !std::isfinite(omd->sharpen_peak_jonswap) ||
+       omd->realsea_fmin < 0.0f || omd->realsea_fmax < 0.0f || omd->realsea_dvar <= 0.0f ||
+       omd->wind_velocity < 0.0f || omd->depth <= 0.0f ||
+       (omd->realsea_fmax > 0.0f && omd->realsea_fmin > omd->realsea_fmax) ||
+       (omd->spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP &&
+        (!std::isfinite(omd->fetch_jonswap) || omd->fetch_jonswap <= 0.0f))))
+  {
+    BKE_modifier_set_error(ctx->object,
+                           md,
+                           "Invalid RealSea settings: require finite nonnegative frequency bounds "
+                           "with minimum <= nonzero maximum, positive spread/depth/fetch and "
+                           "nonnegative wind speed");
+    return mesh;
+  }
   if (omd->ocean && !BKE_ocean_is_valid(omd->ocean)) {
     BKE_modifier_set_error(ctx->object, md, "Failed to allocate memory");
     return mesh;
@@ -5204,6 +5224,9 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout &layout = *panel->layout;
 
   PointerRNA *ptr = modifier_panel_get_property_pointers(panel, nullptr);
+  const bool use_realsea = ELEM(RNA_enum_get(ptr, "spectrum"),
+                                MOD_OCEAN_SPECTRUM_REALSEA_PM,
+                                MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP);
 
   layout.use_property_split_set(true);
 
@@ -5212,18 +5235,25 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
   ui::Layout *sub = &col->column(false);
   sub->active_set(RNA_boolean_get(ptr, "use_wave_scale"));
   sub->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
-  col->prop(ptr, "wave_scale_min", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  ui::Layout &cutoff = col->column(false);
+  cutoff.active_set(!use_realsea);
+  cutoff.prop(ptr, "wave_scale_min", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "choppiness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "wind_velocity", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
   layout.separator();
 
   col = &layout.column(false);
-  col->prop(ptr, "wave_alignment", ui::ITEM_R_SLIDER, IFACE_("Alignment"), ICON_NONE);
+  ui::Layout &alignment = col->column(false);
+  alignment.active_set(!use_realsea);
+  alignment.prop(ptr, "wave_alignment", ui::ITEM_R_SLIDER, IFACE_("Alignment"), ICON_NONE);
   ui::Layout &alignment_sub = col->column(false);
-  alignment_sub.active_set(RNA_float_get(ptr, "wave_alignment") > 0.0f);
+  alignment_sub.active_set(use_realsea ? RNA_boolean_get(ptr, "realsea_use_spread") :
+                                         RNA_float_get(ptr, "wave_alignment") > 0.0f);
   alignment_sub.prop(ptr, "wave_direction", UI_ITEM_NONE, IFACE_("Direction"), ICON_NONE);
-  alignment_sub.prop(ptr, "damping", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  ui::Layout &damping = col->column(false);
+  damping.active_set(!use_realsea && RNA_float_get(ptr, "wave_alignment") > 0.0f);
+  damping.prop(ptr, "damping", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 }
 
 static void foam_panel_draw_header(const bContext * /*C*/, Panel *panel)
@@ -5294,11 +5324,12 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
 
   ui::Layout &col = layout.column(false);
   col.prop(ptr, "spectrum", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  if (ELEM(spectrum, MOD_OCEAN_SPECTRUM_TEXEL_MARSEN_ARSLOE, MOD_OCEAN_SPECTRUM_JONSWAP)) {
+  if (ELEM(spectrum,
+           MOD_OCEAN_SPECTRUM_TEXEL_MARSEN_ARSLOE,
+           MOD_OCEAN_SPECTRUM_JONSWAP,
+           MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP))
+  {
     col.prop(ptr, "sharpen_peak_jonswap", ui::ITEM_R_SLIDER, std::nullopt, ICON_NONE);
-    col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  }
-  else if (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP) {
     col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   }
 

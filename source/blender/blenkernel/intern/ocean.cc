@@ -84,18 +84,13 @@ MINLINE float omega(float k, float depth)
 
 static float realsea_spread_kernel(const float s, const float dvar, const float theta)
 {
-  if (s <= 0.0f) {
-    return 1.0f;
-  }
-  const float denom = (dvar > 0.0f) ? dvar : 1.0f;
-  float c = cosf(theta / denom);
-  if (c < 0.0f) {
-    c = -c;
-  }
-  if (c <= 0.0f) {
+  const float angle = theta / dvar;
+  if (fabsf(angle) >= float(M_PI) * 0.5f) {
     return 0.0f;
   }
-  return expf((2.0f * s) * logf(c));
+  const float c = cosf(angle);
+  const float wind_cos = cosf(theta);
+  return powf(c, 2.0f * s) * wind_cos * wind_cos;
 }
 
 static float realsea_spread_integral(const float s, const float dvar, const int samples)
@@ -125,7 +120,9 @@ static void ocean_realsea_build_spread_lut(Ocean *o)
   }
 
   constexpr int lut_size = 256;
-  constexpr int samples = 180;
+  /* Include the wind-cosine term in the normalization. Narrow spreading settings need a
+   * finer angular quadrature than the original display-oriented reference. */
+  constexpr int samples = 2048;
   o->_realsea_lut_size = lut_size;
 
   o->_realsea_spread_lut = MEM_new_array_uninitialized<float>(lut_size, "realsea spread lut");
@@ -134,7 +131,7 @@ static void ocean_realsea_build_spread_lut(Ocean *o)
 
   const float dvar = (o->_realsea_dvar > 0.0f) ? o->_realsea_dvar : 1.0f;
   if (s_max <= 0.0f) {
-    const float uniform = 1.0f / float(M_PI);
+    const float uniform = 2.0f / float(M_PI);
     for (int i = 0; i < lut_size; i++) {
       o->_realsea_spread_lut[i] = uniform;
     }
@@ -2011,6 +2008,21 @@ bool BKE_ocean_init(Ocean *o,
                     int seed)
 {
   int i, j, ii;
+  const bool use_realsea = ELEM(
+      spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP);
+
+  /* The modifier reports an actionable error; direct kernel users also reject invalid input.
+   * Zero frequency bounds deliberately disable their respective cutoff. */
+  if (use_realsea && (!std::isfinite(realsea_fmin) || !std::isfinite(realsea_fmax) ||
+                      !std::isfinite(realsea_dvar) || !std::isfinite(V) || !std::isfinite(depth) ||
+                      !std::isfinite(sharpen_peak_jonswap) || realsea_fmin < 0.0f ||
+                      realsea_fmax < 0.0f || realsea_dvar <= 0.0f || V < 0.0f || depth <= 0.0f ||
+                      (realsea_fmax > 0.0f && realsea_fmin > realsea_fmax) ||
+                      (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP &&
+                       (!std::isfinite(fetch_jonswap) || fetch_jonswap <= 0.0f))))
+  {
+    return false;
+  }
 
   BLI_rw_mutex_lock(&o->oceanmutex, THREAD_LOCK_WRITE);
 
@@ -2037,13 +2049,17 @@ bool BKE_ocean_init(Ocean *o,
   /* Common JONSWAP parameters. */
   o->_fetch_jonswap = fetch_jonswap;
   o->_sharpen_peak_jonswap = sharpen_peak_jonswap * 10.0f;
+  if (use_realsea) {
+    /* A stored zero is the pre-existing DNA default. Preserve legacy spectra's zero handling,
+     * but give newly selected RealSea JONSWAP the documented gamma of 3.3. */
+    o->_sharpen_peak_jonswap = sharpen_peak_jonswap == 0.0f ?
+                                   3.3f :
+                                   std::clamp(o->_sharpen_peak_jonswap, 1.0f, 6.0f);
+  }
 
   /* Realsea parameters. */
   o->_realsea_fmin = std::max(realsea_fmin, 0.0f);
   o->_realsea_fmax = realsea_fmax;
-  if (o->_realsea_fmax > 0.0f && o->_realsea_fmax < o->_realsea_fmin) {
-    std::swap(o->_realsea_fmin, o->_realsea_fmax);
-  }
   o->_realsea_dvar = (realsea_dvar > 0.0f) ? realsea_dvar : 1.0f;
   o->_realsea_use_spread = use_realsea_spread;
   o->_realsea_fp = 0.0f;
@@ -2109,6 +2125,17 @@ bool BKE_ocean_init(Ocean *o,
     o->_kz[i] = -2.0f * float(M_PI) * ii / o->_Lz;
   }
 
+  if (use_realsea) {
+    /* Standard DFT bins: the last bin is -1, not the legacy ocean's duplicate zero.
+     * Keep legacy spectra's indexing unchanged for existing scene reproducibility. */
+    for (i = o->_M / 2 + 1; i < o->_M; i++) {
+      o->_kx[i] = 2.0f * float(M_PI) * (i - o->_M) / o->_Lx;
+    }
+    for (j = o->_N / 2 + 1; j < o->_N; j++) {
+      o->_kz[j] = 2.0f * float(M_PI) * (j - o->_N) / o->_Lz;
+    }
+  }
+
   /* pre-calculate the k matrix */
   for (i = 0; i < o->_M; i++) {
     for (j = 0; j <= o->_N / 2; j++) {
@@ -2156,24 +2183,34 @@ bool BKE_ocean_init(Ocean *o,
        * change with changing resolution.
        * Explicitly cast to signed int first to ensure consistent behavior on all processors,
        * since behavior of `float` to `uint` cast is undefined in C. */
-      const int hash_x = o->_kx[i] * 360.0f;
-      const int hash_z = o->_kz[j] * 360.0f;
+      const int hash_x = use_realsea ? (i <= o->_M / 2 ? i : i - o->_M) : int(o->_kx[i] * 360.0f);
+      const int hash_z = use_realsea ? (j <= o->_N / 2 ? j : j - o->_N) : int(o->_kz[j] * 360.0f);
       int new_seed = seed + BLI_hash_int_2d(hash_x, hash_z);
 
       BLI_rng_seed(rng, new_seed);
       float r1 = gaussRand(rng);
       float r2 = gaussRand(rng);
 
-      if (o->_realsea_use_spread &&
-          ELEM(o->_spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP))
-      {
-        float phi = BLI_rng_get_float(rng) * 2.0f * float(M_PI);
-        r1 = cosf(phi);
-        r2 = sinf(phi);
-      }
-
       fftw_complex r1r2;
       init_complex(r1r2, r1, r2);
+      if (use_realsea) {
+        /* Sf is one-sided elevation variance per Hz and D integrates to one over direction.
+         * Sk = Sf D (df/dk)/k therefore integrates to variance over the full k plane.
+         * FFTW's c2r transform is an unnormalized sum. For the two evolving terms
+         * h(k,t)=h0(k)e^(iwt)+conj(h0(-k))e^(-iwt), each h0 needs half the mode variance.
+         * E[|r1+i*r2|^2]=2 gives the factor 1/4 below, with no grid-size normalization. */
+        const bool nyquist = (o->_M % 2 == 0 && i == o->_M / 2) ||
+                             (o->_N % 2 == 0 && j == o->_N / 2);
+        const float density = nyquist ?
+                                  0.0f :
+                                  (o->_spectrum == MOD_OCEAN_SPECTRUM_REALSEA_PM ?
+                                       BLI_ocean_spectrum_realsea_pm(o, o->_kx[i], o->_kz[j]) :
+                                       BLI_ocean_spectrum_realsea_jonswap(
+                                           o, o->_kx[i], o->_kz[j]));
+        const float cell_area = (2.0f * float(M_PI) / o->_Lx) * (2.0f * float(M_PI) / o->_Lz);
+        mul_complex_f(o->_h0[i * o->_N + j], r1r2, sqrtf(density * cell_area * 0.25f));
+        continue;
+      }
       switch (o->_spectrum) {
         case MOD_OCEAN_SPECTRUM_JONSWAP:
           mul_complex_f(o->_h0[i * o->_N + j],
@@ -2193,24 +2230,6 @@ bool BKE_ocean_init(Ocean *o,
               r1r2,
               sqrt(BLI_ocean_spectrum_texelmarsenarsloe(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
-        case MOD_OCEAN_SPECTRUM_REALSEA_PM:
-          mul_complex_f(o->_h0[i * o->_N + j],
-                        r1r2,
-                        sqrt(BLI_ocean_spectrum_realsea_pm(o, o->_kx[i], o->_kz[j]) / 2.0f));
-          mul_complex_f(o->_h0_minus[i * o->_N + j],
-                        r1r2,
-                        sqrt(BLI_ocean_spectrum_realsea_pm(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
-          break;
-        case MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP:
-          mul_complex_f(
-              o->_h0[i * o->_N + j],
-              r1r2,
-              sqrt(BLI_ocean_spectrum_realsea_jonswap(o, o->_kx[i], o->_kz[j]) / 2.0f));
-          mul_complex_f(
-              o->_h0_minus[i * o->_N + j],
-              r1r2,
-              sqrt(BLI_ocean_spectrum_realsea_jonswap(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
-          break;
         case MOD_OCEAN_SPECTRUM_PIERSON_MOSKOWITZ:
           mul_complex_f(
               o->_h0[i * o->_N + j],
@@ -2226,6 +2245,21 @@ bool BKE_ocean_init(Ocean *o,
           mul_complex_f(
               o->_h0_minus[i * o->_N + j], r1r2, sqrt(Ph(o, -o->_kx[i], -o->_kz[j]) / 2.0f));
           break;
+      }
+    }
+  }
+
+  if (use_realsea) {
+    /* The negative-frequency term must use the coefficient at the actual opposite bin,
+     * rather than reusing the current bin's random number. This guarantees h(-k)=conj(h(k)),
+     * including the real-valued boundaries of FFTW's half-spectrum. Nyquist axes are omitted
+     * because their signed propagation direction is ambiguous on the sampled lattice. */
+    for (i = 0; i < o->_M; i++) {
+      for (j = 0; j < o->_N; j++) {
+        const int opposite_i = (o->_M - i) % o->_M;
+        const int opposite_j = (o->_N - j) % o->_N;
+        const fftw_complex &opposite = o->_h0[opposite_i * o->_N + opposite_j];
+        init_complex(o->_h0_minus[i * o->_N + j], opposite[0], opposite[1]);
       }
     }
   }
@@ -2292,7 +2326,7 @@ bool BKE_ocean_init(Ocean *o,
 
   BLI_rw_mutex_unlock(&o->oceanmutex);
 
-  if (o->_use_wave_scale) {
+  if (o->_use_wave_scale && !use_realsea) {
     set_height_normalize_factor(o);
   }
   else {

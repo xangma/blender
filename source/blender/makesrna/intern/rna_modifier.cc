@@ -1435,6 +1435,14 @@ static void rna_UVProjectModifier_num_projectors_set(PointerRNA *ptr, int value)
   }
 }
 
+static int rna_OceanModifier_spectrum_implementation_version_get(PointerRNA *ptr)
+{
+  const OceanModifierData *omd = static_cast<const OceanModifierData *>(ptr->data);
+  return ELEM(omd->spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP) ?
+             2 :
+             1;
+}
+
 static void rna_OceanModifier_init_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   OceanModifierData *omd = static_cast<OceanModifierData *>(ptr->data);
@@ -6991,7 +6999,8 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   prop = RNA_def_property(srna, "wind_velocity", PROP_FLOAT, PROP_VELOCITY);
   RNA_def_property_float_sdna(prop, nullptr, "wind_velocity");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
-  RNA_def_property_ui_text(prop, "Wind Velocity", "Wind speed");
+  RNA_def_property_ui_text(
+      prop, "Wind Velocity", "Wind speed in m/s (RealSea uses wind measured at 19.5 m height)");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "damping", PROP_FLOAT, PROP_FACTOR);
@@ -7031,7 +7040,10 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_USE_WAVE_SCALE);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
-      prop, "Use Scale", "Use wave scale and normalization for displacement");
+      prop,
+      "Use Scale",
+      "Apply Wave Scale to displacement; legacy spectra also normalize their initial peak height, "
+      "while RealSea retains physical spectral amplitudes");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "depth", PROP_FLOAT, PROP_DISTANCE);
@@ -7083,6 +7095,15 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_ui_text(prop, "Spectrum", "Spectrum to use");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
+  prop = RNA_def_property(srna, "spectrum_implementation_version", PROP_INT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_EDITABLE | PROP_ANIMATABLE);
+  RNA_def_property_int_funcs(
+      prop, "rna_OceanModifier_spectrum_implementation_version_get", nullptr, nullptr);
+  RNA_def_property_ui_text(
+      prop,
+      "Spectrum Implementation Version",
+      "Numerical spectrum contract: 2 for variance-preserving RealSea, 1 for legacy spectra");
+
   prop = RNA_def_property(srna, "fetch_jonswap", PROP_FLOAT, PROP_UNSIGNED);
   RNA_def_property_float_sdna(prop, nullptr, "fetch_jonswap");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
@@ -7092,29 +7113,34 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
       "Fetch",
       "This is the distance from a lee shore, "
       "called the fetch, or the distance over which the wind blows with constant velocity. "
-      "Used by 'JONSWAP' and 'TMA' models.");
+      "In meters. Used by JONSWAP, TMA and RealSea JONSWAP models.");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "sharpen_peak_jonswap", PROP_FLOAT, PROP_UNSIGNED);
   RNA_def_property_float_sdna(prop, nullptr, "sharpen_peak_jonswap");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_range(prop, 0.0, 1.0);
-  RNA_def_property_ui_text(prop, "Sharpen Peak", "Peak sharpening for 'JONSWAP' and 'TMA' models");
+  RNA_def_property_ui_text(prop,
+                           "Sharpen Peak",
+                           "Peak enhancement gamma divided by 10 for JONSWAP, TMA and RealSea "
+                           "JONSWAP; RealSea uses gamma 3.3 when this is zero");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "realsea_fmin", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "realsea_fmin");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0.0, FLT_MAX);
   RNA_def_property_ui_text(
-      prop, "Min Frequency", "Minimum frequency for Realsea spectra (Hz)");
+      prop, "Min Frequency", "Minimum frequency for RealSea spectra in Hz; zero disables cutoff");
   RNA_def_property_ui_range(prop, 0.0, 10.0, 0.1, 3);
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "realsea_fmax", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "realsea_fmax");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0.0, FLT_MAX);
   RNA_def_property_ui_text(
-      prop, "Max Frequency", "Maximum frequency for Realsea spectra (Hz)");
+      prop, "Max Frequency", "Maximum frequency for RealSea spectra in Hz; zero disables cutoff");
   RNA_def_property_ui_range(prop, 0.0, 10.0, 0.1, 3);
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
@@ -7122,12 +7148,13 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_boolean_sdna(prop, nullptr, "flag", MOD_OCEAN_USE_REALSEA_SPREAD);
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
-      prop, "Use Directional Spread", "Apply Realsea directional spreading term");
+      prop, "Use Directional Spread", "Use normalized RealSea spreading; otherwise isotropic");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "realsea_spread", PROP_FLOAT, PROP_NONE);
   RNA_def_property_float_sdna(prop, nullptr, "realsea_dvar");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 0.1, 4.0);
   RNA_def_property_ui_text(
       prop, "Directional Spread", "Directional spreading divisor (dvar) for Realsea spectra");
   RNA_def_property_ui_range(prop, 0.1, 4.0, 0.1, 3);
