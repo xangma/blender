@@ -83,7 +83,9 @@ blender -b --factory-startup --python-exit-code 1 \
   --python tests/python/physics_ocean_realsea.py
 ```
 
-The test independently computes deep-water PM density; reconstructs modal
+The test independently computes deep-water PM and constant-alpha JONSWAP density;
+checks absolute JONSWAP variance at gamma 1, 3.3 and 6 over twelve seeded realizations;
+reconstructs modal
 coefficients from evaluated height fields at two times; predicts a third time;
 checks modal and spatial variance, opposite bins, frequency bounds and Nyquist
 axes; compares patch sizes/resolutions and angular orientations; and exercises

@@ -92,6 +92,27 @@ def pm_density(modifier):
     return density
 
 
+def jonswap_density(modifier, gamma):
+    """Independent RealSea constant-alpha JONSWAP variance density in the deep-water limit."""
+    k, omega, f = frequencies(modifier)
+    wind_at_10_m = modifier.wind_velocity / 1.025
+    peak_omega = 22.0 * (G ** 2 / (wind_at_10_m * modifier.fetch_jonswap)) ** (1.0 / 3.0)
+    peak_frequency = peak_omega / (2.0 * np.pi)
+    density = np.zeros_like(k)
+    active = (f >= modifier.realsea_fmin) & (f <= modifier.realsea_fmax) & (k > 0)
+    f_active = f[active]
+    sigma = np.where(f_active <= peak_frequency, 0.07, 0.09)
+    peak_shape = np.exp(-0.5 * ((f_active / peak_frequency - 1.0) / sigma) ** 2)
+    sf = (0.0081 * G ** 2 / ((2.0 * np.pi) ** 4 * f_active ** 5) *
+          np.exp(-1.25 * (peak_frequency / f_active) ** 4) * gamma ** peak_shape)
+    df_dk = G / (4.0 * np.pi * omega[active])
+    density[active] = sf * df_dk / k[active] / (2.0 * np.pi)
+    n = modifier.viewport_resolution ** 2
+    if n % 2 == 0:
+        density[n // 2, :] = density[:, n // 2] = 0.0
+    return density
+
+
 def mean_variance(obj, modifier, seeds=12, **settings):
     values = [float(np.var(height_field(obj, modifier, random_seed=seed, **settings)))
               for seed in range(seeds)]
@@ -182,6 +203,28 @@ def test_direction_and_spreading(obj, modifier):
     modifier.wave_direction = 0.0
 
 
+def test_jonswap_absolute_variance(obj, modifier):
+    modifier.spectrum = "REALSEA_JONSWAP"
+    modifier.wind_velocity = 4.0
+    modifier.fetch_jonswap = 30000.0
+    modifier.realsea_fmin = 0.2
+    modifier.realsea_fmax = 0.6
+    modifier.realsea_use_spread = False
+    modifier.spatial_size = 128
+    modifier.resolution = modifier.viewport_resolution = 12
+    reports = []
+    for gamma in (1.0, 3.3, 6.0):
+        expected = float(np.sum(jonswap_density(modifier, gamma)) *
+                         (2.0 * np.pi / modifier.spatial_size) ** 2)
+        observed = mean_variance(obj, modifier, seeds=12, time=0.2,
+                                 sharpen_peak_jonswap=gamma / 10.0)
+        # Twelve realizations cover thousands of resolved modes in this band. The tolerance
+        # allows finite Gaussian sampling variance, not a fitted change to the density scale.
+        assert math.isclose(observed, expected, rel_tol=0.06), (gamma, observed, expected)
+        reports.append({"gamma": gamma, "variance": observed, "expected_variance": expected})
+    print(json.dumps({"check": "jonswap_absolute_variance", "cases": reports}))
+
+
 def test_effective_controls(obj, modifier):
     modifier.spectrum = "REALSEA_JONSWAP"
     modifier.realsea_fmin = 0.05
@@ -217,6 +260,7 @@ def main():
     test_mode_variance_and_evolution(obj, modifier)
     test_extent_and_resolution(obj, modifier)
     test_direction_and_spreading(obj, modifier)
+    test_jonswap_absolute_variance(obj, modifier)
     test_effective_controls(obj, modifier)
     print("REALSEA_PHYSICS_V2_PASS")
 
