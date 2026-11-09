@@ -30,6 +30,9 @@
 #include "BKE_image_format.hh"
 #include "BKE_ocean.h"
 #include "ocean_intern.h"
+#ifdef WITH_OCEAN_CUDA
+#  include "ocean_cuda.hh"
+#endif
 
 #include "IMB_imbuf.hh"
 #include "IMB_imbuf_types.hh"
@@ -40,6 +43,57 @@
 #include "BLI_hash.h"
 
 namespace blender {
+
+bool BKE_ocean_sample_cuda(Ocean *oc,
+                           int count,
+                           float size_co_inv,
+                           float foam_coverage,
+                           bool inverse_spray,
+                           const float *reference,
+                           float *positions,
+                           unsigned char *foam,
+                           float *compression,
+                           unsigned char *spray)
+{
+#ifdef WITH_OCEAN_CUDA
+  const char *enabled = std::getenv("BLENDER_OCEAN_CUDA");
+  if (!enabled || enabled[0] != '1' || count < 16384 || !oc || !oc->_do_disp_y ||
+      (foam && (!oc->_do_jacobian || !compression)))
+  {
+    return false;
+  }
+  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
+  const ocean_cuda::Input input{oc->_M,
+                                oc->_N,
+                                bool(oc->_do_chop),
+                                bool(oc->_do_jacobian),
+                                size_co_inv,
+                                foam_coverage,
+                                inverse_spray,
+                                oc->_disp_y,
+                                oc->_disp_x,
+                                oc->_disp_z,
+                                oc->_Jxx,
+                                oc->_Jzz,
+                                oc->_Jxz};
+  const bool success = ocean_cuda::sample(
+      input, count, reference, positions, foam, compression, spray);
+  BLI_rw_mutex_unlock(&oc->oceanmutex);
+  return success;
+#else
+  UNUSED_VARS(oc,
+              count,
+              size_co_inv,
+              foam_coverage,
+              inverse_spray,
+              reference,
+              positions,
+              foam,
+              compression,
+              spray);
+  return false;
+#endif
+}
 
 #ifdef WITH_OCEANSIM
 

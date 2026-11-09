@@ -691,6 +691,17 @@ if(WITH_MOD_OCEANSIM)
   add_definitions(-DWITH_OCEANSIM)
 endif()
 
+if(WITH_OCEAN_CUDA)
+  add_library(bf_ocean_cuda STATIC intern/ocean_cuda.cu intern/ocean_cuda.hh)
+  set_target_properties(bf_ocean_cuda PROPERTIES CUDA_STANDARD 17 CUDA_STANDARD_REQUIRED ON)
+  target_compile_options(bf_ocean_cuda PRIVATE
+    $<$<COMPILE_LANGUAGE:CUDA>:--fmad=false;--ftz=false;--prec-div=true;--prec-sqrt=true>
+  )
+  list(APPEND LIB bf_ocean_cuda)
+  add_definitions(-DWITH_OCEAN_CUDA)
+endif()
+
+
 if(WITH_JACK)
   add_definitions(-DWITH_JACK)
 endif()

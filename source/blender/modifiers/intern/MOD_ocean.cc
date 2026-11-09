@@ -4698,6 +4698,8 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     }
   }
 
+  bool cuda_displaced = false;
+
   /* Add vertex-colors before displacement: allows lookup based on position. */
 
   if (omd->flag & MOD_OCEAN_GENERATE_FOAM) {
@@ -4729,53 +4731,69 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
       Array<ColorGeometry4b> vertex_foam(result->verts_num);
       Array<float> vertex_compression(compression_attr ? result->verts_num : 0);
       Array<ColorGeometry4b> vertex_spray(mloopcols_spray ? result->verts_num : 0);
-      OceanSplitRuntimeReadScope foam_read_scope{};
-      if (!use_cached_foam) {
-        BKE_ocean_split_runtime_read_begin(omd->ocean, &foam_read_scope);
+      if (!use_camera_lod && !use_cached_foam) {
+        cuda_displaced = BKE_ocean_sample_cuda(
+            omd->ocean,
+            result->verts_num,
+            size_co_inv,
+            omd->foam_coverage,
+            (omd->flag & MOD_OCEAN_INVERT_SPRAY) != 0,
+            reinterpret_cast<const float *>(reference_positions.data()),
+            reinterpret_cast<float *>(positions.data()),
+            reinterpret_cast<unsigned char *>(vertex_foam.data()),
+            vertex_compression.data(),
+            vertex_spray.is_empty() ? nullptr :
+                                      reinterpret_cast<unsigned char *>(vertex_spray.data()));
       }
-      for (const int vert : positions.index_range()) {
-        ColorGeometry4b *mlcol = &vertex_foam[vert];
-        ColorGeometry4b *mlcolspray = vertex_spray.is_empty() ? nullptr : &vertex_spray[vert];
-        const float *vco = reference_positions[vert];
-        const float u = OCEAN_CO(size_co_inv, vco[0]);
-        const float v = OCEAN_CO(size_co_inv, vco[1]);
-        float foam;
-
-        if (use_cached_foam) {
-          BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
-          foam = ocr.foam;
-          CLAMP(foam, 0.0f, 1.0f);
+      if (!cuda_displaced) {
+        OceanSplitRuntimeReadScope foam_read_scope{};
+        if (!use_cached_foam) {
+          BKE_ocean_split_runtime_read_begin(omd->ocean, &foam_read_scope);
         }
-        else {
-          BKE_ocean_eval_uv_in_scope(&foam_read_scope, &ocr, u, v);
-          foam = BKE_ocean_jminus_to_foam(ocr.Jminus, omd->foam_coverage);
-        }
+        for (const int vert : positions.index_range()) {
+          ColorGeometry4b *mlcol = &vertex_foam[vert];
+          ColorGeometry4b *mlcolspray = vertex_spray.is_empty() ? nullptr : &vertex_spray[vert];
+          const float *vco = reference_positions[vert];
+          const float u = OCEAN_CO(size_co_inv, vco[0]);
+          const float v = OCEAN_CO(size_co_inv, vco[1]);
+          float foam;
 
-        mlcol->r = mlcol->g = mlcol->b = char(foam * 255);
-        /* This needs to be set (render engine uses) */
-        mlcol->a = 255;
-        if (!vertex_compression.is_empty()) {
-          vertex_compression[vert] = std::max(-ocr.Jminus, 0.0f);
-        }
-
-        if (mlcolspray != nullptr) {
-          if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
-            mlcolspray->r = ocr.Eminus[0] * 255;
+          if (use_cached_foam) {
+            BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
+            foam = ocr.foam;
+            CLAMP(foam, 0.0f, 1.0f);
           }
           else {
-            mlcolspray->r = ocr.Eplus[0] * 255;
+            BKE_ocean_eval_uv_in_scope(&foam_read_scope, &ocr, u, v);
+            foam = BKE_ocean_jminus_to_foam(ocr.Jminus, omd->foam_coverage);
           }
-          mlcolspray->g = 0;
-          if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
-            mlcolspray->b = ocr.Eminus[2] * 255;
+
+          mlcol->r = mlcol->g = mlcol->b = char(foam * 255);
+          /* This needs to be set (render engine uses) */
+          mlcol->a = 255;
+          if (!vertex_compression.is_empty()) {
+            vertex_compression[vert] = std::max(-ocr.Jminus, 0.0f);
           }
-          else {
-            mlcolspray->b = ocr.Eplus[2] * 255;
+
+          if (mlcolspray != nullptr) {
+            if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
+              mlcolspray->r = ocr.Eminus[0] * 255;
+            }
+            else {
+              mlcolspray->r = ocr.Eplus[0] * 255;
+            }
+            mlcolspray->g = 0;
+            if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
+              mlcolspray->b = ocr.Eminus[2] * 255;
+            }
+            else {
+              mlcolspray->b = ocr.Eplus[2] * 255;
+            }
+            mlcolspray->a = 255;
           }
-          mlcolspray->a = 255;
         }
+        BKE_ocean_split_runtime_read_end(&foam_read_scope);
       }
-      BKE_ocean_split_runtime_read_end(&foam_read_scope);
       for (const int corner : corner_verts.index_range()) {
         const int vert = corner_verts[corner];
         mloopcols.span[corner] = vertex_foam[vert];
@@ -4830,17 +4848,31 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   {
     OceanEvaluationScope displacement_scope("ocean.displacement");
     const double displacement_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+    if (!cuda_displaced && !use_camera_lod && !(omd->oceancache && omd->cached)) {
+      cuda_displaced = BKE_ocean_sample_cuda(
+          omd->ocean,
+          result->verts_num,
+          size_co_inv,
+          omd->foam_coverage,
+          false,
+          reinterpret_cast<const float *>(reference_positions.data()),
+          reinterpret_cast<float *>(positions.data()),
+          nullptr,
+          nullptr,
+          nullptr);
+    }
     const int verts_num = result->verts_num;
     OceanSplitRuntimeReadScope split_read_scope{};
     const OceanSplitRuntimeReadScope *split_read_scope_ptr = nullptr;
-    const bool use_live_dense = !use_camera_lod && !(omd->oceancache && omd->cached);
+    const bool use_live_dense = !cuda_displaced && !use_camera_lod &&
+                                !(omd->oceancache && omd->cached);
     if ((use_camera_lod_mesh || use_live_dense) &&
         BKE_ocean_split_runtime_read_begin(omd->ocean, &split_read_scope))
     {
       split_read_scope_ptr = &split_read_scope;
     }
 
-    for (i = 0; i < verts_num; i++) {
+    for (i = 0; !cuda_displaced && i < verts_num; i++) {
       float *vco = positions[i];
       const float3 reference_co = reference_positions[i];
       const float2 ref_uv = ocean_reference_uv(reference_co, size_co_inv);

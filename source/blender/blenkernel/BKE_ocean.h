@@ -184,6 +184,18 @@ float BKE_ocean_jminus_to_foam(float jminus, float coverage);
  * Sampling the ocean surface.
  */
 void BKE_ocean_eval_uv(struct Ocean *oc, struct OceanResult *ocr, float u, float v);
+/** Experimental dense CUDA sampling; false leaves all outputs untouched for CPU fallback. */
+bool BKE_ocean_sample_cuda(struct Ocean *oc,
+                           int vertex_count,
+                           float size_co_inv,
+                           float foam_coverage,
+                           bool inverse_spray,
+                           const float *reference_positions,
+                           float *positions,
+                           unsigned char *foam,
+                           float *compression,
+                           unsigned char *spray);
+
 /**
  * Use catmullrom interpolation rather than linear.
  */
