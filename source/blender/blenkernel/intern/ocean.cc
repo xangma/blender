@@ -974,7 +974,7 @@ float BKE_ocean_jminus_to_foam(float jminus, float coverage)
   return foam;
 }
 
-void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
+static void ocean_eval_uv_locked(const Ocean *oc, OceanResult *ocr, float u, float v)
 {
   int i0, i1, j0, j1;
   float frac_x, frac_z;
@@ -990,8 +990,6 @@ void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
   if (v < 0) {
     v += 1.0f;
   }
-
-  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
 
   uu = u * oc->_M;
   vv = v * oc->_N;
@@ -1041,8 +1039,22 @@ void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
     }
   }
 #  undef BILERP
+}
 
+void BKE_ocean_eval_uv(Ocean *oc, OceanResult *ocr, float u, float v)
+{
+  BLI_rw_mutex_lock(&oc->oceanmutex, THREAD_LOCK_READ);
+  ocean_eval_uv_locked(oc, ocr, u, v);
   BLI_rw_mutex_unlock(&oc->oceanmutex);
+}
+
+void BKE_ocean_eval_uv_in_scope(const OceanSplitRuntimeReadScope *scope,
+                                OceanResult *ocr,
+                                float u,
+                                float v)
+{
+  BLI_assert(scope != nullptr && scope->ocean != nullptr);
+  ocean_eval_uv_locked(scope->ocean, ocr, u, v);
 }
 
 void BKE_ocean_eval_uv_catrom(Ocean *oc, OceanResult *ocr, float u, float v)
@@ -2884,6 +2896,13 @@ float BKE_ocean_jminus_to_foam(float /*jminus*/, float /*coverage*/)
 }
 
 void BKE_ocean_eval_uv(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*u*/, float /*v*/) {}
+
+void BKE_ocean_eval_uv_in_scope(const OceanSplitRuntimeReadScope * /*scope*/,
+                                OceanResult * /*ocr*/,
+                                float /*u*/,
+                                float /*v*/)
+{
+}
 
 /* use catmullrom interpolation rather than linear */
 void BKE_ocean_eval_uv_catrom(Ocean * /*oc*/, OceanResult * /*ocr*/, float /*u*/, float /*v*/) {}

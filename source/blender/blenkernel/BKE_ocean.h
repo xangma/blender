@@ -229,6 +229,15 @@ bool BKE_ocean_split_runtime_sample_level(const struct Ocean *oc,
 bool BKE_ocean_split_runtime_read_begin(const struct Ocean *oc,
                                         struct OceanSplitRuntimeReadScope *r_scope);
 void BKE_ocean_split_runtime_read_end(struct OceanSplitRuntimeReadScope *scope);
+/**
+ * Sample the full spectrum while an active read scope protects the Ocean buffers.
+ * The scope must remain active until all sampling tasks have completed.
+ */
+void BKE_ocean_eval_uv_in_scope(const struct OceanSplitRuntimeReadScope *scope,
+                                struct OceanResult *ocr,
+                                float u,
+                                float v);
+
 bool BKE_ocean_split_runtime_level_get_in_scope(const struct OceanSplitRuntimeReadScope *scope,
                                                 int level_index,
                                                 struct OceanSplitRuntimeLevel *r_level);

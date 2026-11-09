@@ -4433,7 +4433,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   };
 
   int cfra_for_cache;
-  int i, j;
+  int i;
   Array<int> camera_lod_levels;
   Array<float> camera_lod_morph_factors;
   Array<float> camera_lod_radii;
@@ -4647,7 +4647,6 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   MutableSpan<float3> positions = result->vert_positions_for_write();
   Array<float3> reference_positions(result->verts_num);
   reference_positions.as_mutable_span().copy_from(positions);
-  const OffsetIndices faces = result->faces();
   const Span<int> corner_verts = result->corner_verts();
   const bool use_camera_lod_mesh = use_camera_lod && camera_lod_levels.size() == result->verts_num &&
                                    camera_lod_morph_factors.size() == result->verts_num;
@@ -4724,59 +4723,67 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     }
 
     if (mloopcols) { /* unlikely to fail */
+      /* Foam and spray depend only on the undisplaced vertex position. Sample once per
+       * vertex, then scatter to the corner domain instead of repeating the full Ocean
+       * lookup (including Jacobian eigenvectors) for every incident face corner. */
+      Array<ColorGeometry4b> vertex_foam(result->verts_num);
+      Array<float> vertex_compression(compression_attr ? result->verts_num : 0);
+      Array<ColorGeometry4b> vertex_spray(mloopcols_spray ? result->verts_num : 0);
+      OceanSplitRuntimeReadScope foam_read_scope{};
+      if (!use_cached_foam) {
+        BKE_ocean_split_runtime_read_begin(omd->ocean, &foam_read_scope);
+      }
+      for (const int vert : positions.index_range()) {
+        ColorGeometry4b *mlcol = &vertex_foam[vert];
+        ColorGeometry4b *mlcolspray = vertex_spray.is_empty() ? nullptr : &vertex_spray[vert];
+        const float *vco = reference_positions[vert];
+        const float u = OCEAN_CO(size_co_inv, vco[0]);
+        const float v = OCEAN_CO(size_co_inv, vco[1]);
+        float foam;
 
-      for (const int i : faces.index_range()) {
-        const IndexRange face = faces[i];
-        const int *corner_vert = &corner_verts[face.start()];
-        ColorGeometry4b *mlcol = &mloopcols.span[face.start()];
-        float *compression = compression_attr ? &compression_attr.span[face.start()] : nullptr;
-
-        ColorGeometry4b *mlcolspray = nullptr;
-        if ((omd->flag & MOD_OCEAN_GENERATE_SPRAY) && mloopcols_spray) {
-          mlcolspray = &mloopcols_spray.span[face.start()];
+        if (use_cached_foam) {
+          BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
+          foam = ocr.foam;
+          CLAMP(foam, 0.0f, 1.0f);
+        }
+        else {
+          BKE_ocean_eval_uv_in_scope(&foam_read_scope, &ocr, u, v);
+          foam = BKE_ocean_jminus_to_foam(ocr.Jminus, omd->foam_coverage);
         }
 
-        for (j = face.size(); j--; corner_vert++, mlcol++) {
-          const float *vco = reference_positions[*corner_vert];
-          const float u = OCEAN_CO(size_co_inv, vco[0]);
-          const float v = OCEAN_CO(size_co_inv, vco[1]);
-          float foam;
+        mlcol->r = mlcol->g = mlcol->b = char(foam * 255);
+        /* This needs to be set (render engine uses) */
+        mlcol->a = 255;
+        if (!vertex_compression.is_empty()) {
+          vertex_compression[vert] = std::max(-ocr.Jminus, 0.0f);
+        }
 
-          if (use_cached_foam) {
-            BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
-            foam = ocr.foam;
-            CLAMP(foam, 0.0f, 1.0f);
+        if (mlcolspray != nullptr) {
+          if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
+            mlcolspray->r = ocr.Eminus[0] * 255;
           }
           else {
-            BKE_ocean_eval_uv(omd->ocean, &ocr, u, v);
-            foam = BKE_ocean_jminus_to_foam(ocr.Jminus, omd->foam_coverage);
+            mlcolspray->r = ocr.Eplus[0] * 255;
           }
-
-          mlcol->r = mlcol->g = mlcol->b = char(foam * 255);
-          /* This needs to be set (render engine uses) */
-          mlcol->a = 255;
-          if (compression != nullptr) {
-            *compression = std::max(-ocr.Jminus, 0.0f);
-            compression++;
+          mlcolspray->g = 0;
+          if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
+            mlcolspray->b = ocr.Eminus[2] * 255;
           }
-
-          if (mlcolspray != nullptr) {
-            if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
-              mlcolspray->r = ocr.Eminus[0] * 255;
-            }
-            else {
-              mlcolspray->r = ocr.Eplus[0] * 255;
-            }
-            mlcolspray->g = 0;
-            if (omd->flag & MOD_OCEAN_INVERT_SPRAY) {
-              mlcolspray->b = ocr.Eminus[2] * 255;
-            }
-            else {
-              mlcolspray->b = ocr.Eplus[2] * 255;
-            }
-            mlcolspray->a = 255;
-            mlcolspray++;
+          else {
+            mlcolspray->b = ocr.Eplus[2] * 255;
           }
+          mlcolspray->a = 255;
+        }
+      }
+      BKE_ocean_split_runtime_read_end(&foam_read_scope);
+      for (const int corner : corner_verts.index_range()) {
+        const int vert = corner_verts[corner];
+        mloopcols.span[corner] = vertex_foam[vert];
+        if (compression_attr) {
+          compression_attr.span[corner] = vertex_compression[vert];
+        }
+        if (mloopcols_spray) {
+          mloopcols_spray.span[corner] = vertex_spray[vert];
         }
       }
     }
@@ -4826,7 +4833,10 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     const int verts_num = result->verts_num;
     OceanSplitRuntimeReadScope split_read_scope{};
     const OceanSplitRuntimeReadScope *split_read_scope_ptr = nullptr;
-    if (use_camera_lod_mesh && BKE_ocean_split_runtime_read_begin(omd->ocean, &split_read_scope)) {
+    const bool use_live_dense = !use_camera_lod && !(omd->oceancache && omd->cached);
+    if ((use_camera_lod_mesh || use_live_dense) &&
+        BKE_ocean_split_runtime_read_begin(omd->ocean, &split_read_scope))
+    {
       split_read_scope_ptr = &split_read_scope;
     }
 
@@ -4967,7 +4977,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           BKE_ocean_cache_eval_uv(omd->oceancache, &ocr, cfra_for_cache, u, v);
         }
         else {
-          BKE_ocean_eval_uv(omd->ocean, &ocr, u, v);
+          BKE_ocean_eval_uv_in_scope(split_read_scope_ptr, &ocr, u, v);
         }
 
         vco[2] += ocr.disp[1];
