@@ -4543,6 +4543,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
       {
         Mesh *cached_result = BKE_mesh_copy_for_eval(*dense_runtime->dense_cached_result);
         BKE_mesh_copy_parameters_for_eval(cached_result, mesh);
+        publish_viewport_status(evaluation_status);
         if (profile_enabled) {
           ocean_camera_lod_profile_logf(object_name,
                                         "dense_cache_hit",
