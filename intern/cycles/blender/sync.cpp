@@ -296,6 +296,16 @@ void BlenderSync::sync_recalc(blender::Depsgraph &b_depsgraph,
 
 static const char *offline_bvh_refit_fallback_reason(Scene &scene)
 {
+  /* The retained-BVH path is qualified for BVH2 and CPU Embree. Other backends have different
+   * shared-buffer and refit contracts and retain their existing offline policy. */
+  const BVHLayout layout = BVHParams::best_bvh_layout(
+      scene.params.bvh_layout,
+      scene.device->get_bvh_layout_mask(scene.dscene.data.kernel_features));
+  if (layout != BVH_LAYOUT_BVH2 &&
+      !(layout == BVH_LAYOUT_EMBREE && scene.device->info.type == DEVICE_CPU))
+  {
+    return "BVH backend";
+  }
   if (scene.need_motion() != Scene::MOTION_NONE) {
     return "motion";
   }
