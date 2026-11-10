@@ -20,6 +20,7 @@
 
 #include "util/log.h"
 #include "util/progress.h"
+#include "util/time.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -39,6 +40,7 @@ void Geometry::compute_bvh(Device *device,
   const BVHLayout bvh_layout = BVHParams::best_bvh_layout(
       params->bvh_layout, device->get_bvh_layout_mask(dscene->data.kernel_features));
   if (need_build_bvh(bvh_layout)) {
+    const scoped_timer timer;
     string msg = "Updating Geometry BVH ";
     if (name.empty()) {
       msg += string_printf("%u/%u", (uint)(n + 1), (uint)total);
@@ -61,7 +63,8 @@ void Geometry::compute_bvh(Device *device,
     vector<Object *> objects;
     objects.push_back(&object);
 
-    if (bvh && !need_update_rebuild && params->bvh_type == BVH_TYPE_DYNAMIC) {
+    const bool refit = bvh && !need_update_rebuild && params->bvh_type == BVH_TYPE_DYNAMIC;
+    if (refit) {
       progress->set_status(msg, "Refitting BVH");
 
       bvh->replace_geometry(geometry, objects);
@@ -86,6 +89,8 @@ void Geometry::compute_bvh(Device *device,
       bvh = BVH::create(bparams, geometry, objects, device);
       MEM_GUARDED_CALL(progress, device->build_bvh, bvh.get(), *progress, false);
     }
+    LOG_INFO << "Geometry BVH " << name << ": " << (refit ? "refit" : "build") << " took "
+             << timer.get_time() << " seconds.";
   }
 
   need_update_rebuild = false;
@@ -97,6 +102,8 @@ void GeometryManager::device_update_bvh(Device *device,
                                         Scene *scene,
                                         Progress &progress)
 {
+  const scoped_callback_timer timer(
+      [](double time) { LOG_INFO << "Scene BVH build and upload: " << time << " seconds."; });
   /* bvh build */
   progress.set_status("Updating Scene BVH", "Building");
 
