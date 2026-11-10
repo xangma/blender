@@ -1594,6 +1594,14 @@ static void create_subd_mesh(Scene *scene,
 
 /* Sync */
 
+static bool mesh_topology_is_modified(const Mesh &mesh)
+{
+  return mesh.triangles_is_modified() || mesh.subd_num_corners_is_modified() ||
+         mesh.subd_shader_is_modified() || mesh.subd_smooth_is_modified() ||
+         mesh.subd_ptex_offset_is_modified() || mesh.subd_start_corner_is_modified() ||
+         mesh.subd_face_corners_is_modified();
+}
+
 void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 {
   OceanEvaluationScope evaluation_scope("cycles.sync_mesh");
@@ -1687,6 +1695,21 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
 
   /* update original sockets */
 
+  /* Geometry::clear and position attribute updates tag all sockets modified.
+   * Compare connectivity first, before those broad tags hide which inputs
+   * actually changed. Keep subdivision and motion on the conservative path. */
+  const Attribute *old_position = mesh->attributes.find(ATTR_STD_POSITION);
+  const bool can_refit_plain_mesh = scene->params.background &&
+                                    scene->params.bvh_type == BVH_TYPE_DYNAMIC &&
+                                    scene->need_motion() == Scene::MOTION_NONE &&
+                                    (!old_position || !old_position->has_motion()) &&
+                                    mesh->get_subdivision_type() == Mesh::SUBDIVISION_NONE &&
+                                    new_mesh.get_subdivision_type() == Mesh::SUBDIVISION_NONE;
+  const bool plain_topology_changed = can_refit_plain_mesh &&
+                                      (mesh_topology_is_modified(*mesh) ||
+                                       mesh->num_verts() != new_mesh.num_verts() ||
+                                       mesh->get_triangles() != new_mesh.get_triangles());
+
   const double clear_non_sockets_start = profile_ocean ? time_dt() : 0.0;
   mesh->clear_non_sockets();
   mesh->ocean_modifier_active = (ocean_omd != nullptr);
@@ -1718,11 +1741,8 @@ void BlenderSync::sync_mesh(BObjectInfo &b_ob_info, Mesh *mesh)
   mesh->set_num_subd_faces(new_mesh.get_num_subd_faces());
 
   /* tag update */
-  const bool rebuild = (mesh->triangles_is_modified()) || (mesh->subd_num_corners_is_modified()) ||
-                       (mesh->subd_shader_is_modified()) || (mesh->subd_smooth_is_modified()) ||
-                       (mesh->subd_ptex_offset_is_modified()) ||
-                       (mesh->subd_start_corner_is_modified()) ||
-                       (mesh->subd_face_corners_is_modified());
+  const bool rebuild = can_refit_plain_mesh ? plain_topology_changed :
+                                              mesh_topology_is_modified(*mesh);
 
   const double tag_update_start = profile_ocean ? time_dt() : 0.0;
   {
