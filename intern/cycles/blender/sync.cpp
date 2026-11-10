@@ -42,8 +42,6 @@
 #include "util/hash.h"
 #include "util/log.h"
 
-#include <cstdlib>
-
 CCL_NAMESPACE_BEGIN
 
 static const char *cryptomatte_prefix = "Crypto";
@@ -386,10 +384,7 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
    * false = don't delete unused shaders, not supported. */
   shader_map.post_sync(false);
 
-  const char *refit_env = std::getenv("BLENDER_CYCLES_BVH_REFIT");
-  if (scene->params.background && scene->params.bvh_type == BVH_TYPE_DYNAMIC && refit_env &&
-      refit_env[0] == '1')
-  {
+  if (scene->params.background && scene->params.bvh_type == BVH_TYPE_DYNAMIC) {
     if (const char *reason = offline_bvh_refit_fallback_reason(*scene)) {
       /* Rebuild the root with the static policy as well as switching geometry
        * updates; an existing dynamic root must not keep instance references. */
@@ -1041,13 +1036,10 @@ SceneParams BlenderSync::get_scene_params(blender::UserDef &b_preferences,
     params.shadingsystem = SHADINGSYSTEM_OSL;
   }
 
-  /* Opt-in animation path: retain per-geometry BVHs and refit unchanged
-   * topology. Retain the static offline default because long deformations can
-   * reduce traversal quality and increase rendering cost. */
-  const char *dynamic_bvh_env = std::getenv("BLENDER_CYCLES_BVH_REFIT");
+  /* Persistent offline sessions can retain per-geometry BVHs and refit unchanged
+   * topology. Unsupported scenes select the static policy after synchronization. */
   const bool dynamic_background = background &&
-                                  (b_scene.r.mode & blender::R_PERSISTENT_DATA) != 0 &&
-                                  dynamic_bvh_env && dynamic_bvh_env[0] == '1';
+                                  (b_scene.r.mode & blender::R_PERSISTENT_DATA) != 0;
   if ((background && !dynamic_background) ||
       (use_developer_ui && get_enum(cscene, "debug_bvh_type")))
   {
