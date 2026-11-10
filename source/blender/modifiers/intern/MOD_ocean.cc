@@ -7,19 +7,21 @@
  */
 
 #include <algorithm>
-#include <cstdarg>
+#include <array>
+#include <atomic>
 #include <cfloat>
 #include <climits>
 #include <cmath>
-#include <cstdlib>
-#include <cstdio>
-#include <cstring>
-#include <atomic>
+#include <cstdarg>
+#include <cstddef>
 #include <cstdint>
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
 #include <ctime>
 #include <functional>
-#include <thread>
 #include <mutex>
+#include <thread>
 #ifdef _WIN32
 #  include <process.h>
 #  include <windows.h>
@@ -2005,7 +2007,29 @@ struct OceanCameraLODEvaluationStatus {
   const char *fallback_reason = nullptr;
 };
 
+/* All value settings follow spatial_size in the DNA structure. The pointer and
+ * ModifierData prefix is deliberately excluded. Include the effective resolution
+ * separately so viewport/render graphs can share results when their grids agree. */
+struct OceanDenseResultKey {
+  int resolution = 0;
+  float frame = 0.0f;
+  bool cuda_requested = false;
+  std::array<unsigned char, sizeof(OceanModifierData) - offsetof(OceanModifierData, spatial_size)>
+      settings{};
+
+  bool operator==(const OceanDenseResultKey &other) const
+  {
+    return resolution == other.resolution && frame == other.frame &&
+           cuda_requested == other.cuda_requested && settings == other.settings;
+  }
+};
+
 struct OceanModifierRuntimeData {
+  std::mutex dense_result_mutex;
+  Mesh *dense_cached_result = nullptr;
+  OceanSamplingSnapshot *dense_sampling_snapshot = nullptr;
+  OceanDenseResultKey dense_result_key;
+  bool dense_result_key_valid = false;
   Mesh *camera_lod_dense_template = nullptr;
   Mesh *camera_lod_cached_result = nullptr;
   OceanCameraLODMeshCacheKey camera_lod_cached_key;
@@ -2228,6 +2252,10 @@ static void free_runtime_data(void *runtime_data_v)
     return;
   }
   OceanModifierRuntimeData *runtime_data = static_cast<OceanModifierRuntimeData *>(runtime_data_v);
+  if (runtime_data->dense_cached_result) {
+    BKE_id_free(nullptr, runtime_data->dense_cached_result);
+  }
+  BKE_ocean_sampling_snapshot_free(runtime_data->dense_sampling_snapshot);
   ocean_modifier_runtime_free_dense_template(*runtime_data);
   ocean_modifier_runtime_free_camera_lod_cache(*runtime_data);
   ocean_modifier_runtime_free_camera_lod_topology_cache(*runtime_data);
@@ -2236,6 +2264,9 @@ static void free_runtime_data(void *runtime_data_v)
 
 static OceanModifierRuntimeData *ocean_ensure_runtime_data(OceanModifierData *omd)
 {
+  /* Original modifiers can be reached by multiple dependency graphs. */
+  static std::mutex initialization_mutex;
+  const std::lock_guard<std::mutex> initialization_lock(initialization_mutex);
   OceanModifierRuntimeData *runtime_data =
       static_cast<OceanModifierRuntimeData *>(omd->modifier.runtime);
   if (runtime_data == nullptr) {
@@ -4486,6 +4517,46 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
     }
   }
 
+  OceanModifierRuntimeData *dense_runtime = nullptr;
+  std::unique_lock<std::mutex> dense_result_lock;
+  OceanDenseResultKey dense_result_key;
+  const char *reuse_env = std::getenv("BLENDER_OCEAN_REUSE");
+  const bool reuse_dense = (!reuse_env || reuse_env[0] != '0') && !requested_camera_lod &&
+                           !omd->cached && omd->geometry_mode == MOD_OCEAN_GEOM_GENERATE &&
+                           (ctx->flag & MOD_APPLY_TO_ORIGINAL) == 0 &&
+                           mesh->vertex_group_names.is_empty();
+  if (reuse_dense) {
+    dense_runtime = ocean_ensure_runtime_data(ocean_modifier_cache_owner(md, ctx));
+    dense_result_lock = std::unique_lock<std::mutex>(dense_runtime->dense_result_mutex);
+    dense_result_key.resolution = resolution;
+    dense_result_key.frame = DEG_get_ctime(ctx->depsgraph);
+    const char *cuda_env = std::getenv("BLENDER_OCEAN_CUDA");
+    dense_result_key.cuda_requested = cuda_env && cuda_env[0] == '1';
+    std::memcpy(dense_result_key.settings.data(),
+                reinterpret_cast<const char *>(omd) + offsetof(OceanModifierData, spatial_size),
+                dense_result_key.settings.size());
+    if (dense_runtime->dense_result_key_valid && dense_runtime->dense_cached_result &&
+        dense_runtime->dense_result_key == dense_result_key)
+    {
+      BKE_ocean_ensure(omd, resolution);
+      if (BKE_ocean_sampling_snapshot_restore(omd->ocean, dense_runtime->dense_sampling_snapshot))
+      {
+        Mesh *cached_result = BKE_mesh_copy_for_eval(*dense_runtime->dense_cached_result);
+        BKE_mesh_copy_parameters_for_eval(cached_result, mesh);
+        if (profile_enabled) {
+          ocean_camera_lod_profile_logf(object_name,
+                                        "dense_cache_hit",
+                                        "total_s=%.6f resolution=%d verts=%d faces=%d",
+                                        BLI_time_now_seconds() - profile_start,
+                                        resolution,
+                                        cached_result->verts_num,
+                                        cached_result->faces_num);
+        }
+        return cached_result;
+      }
+    }
+  }
+
   /* do ocean simulation */
   const double simulation_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
   {
@@ -5142,6 +5213,31 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           BLI_time_now_seconds() - cache_store_start,
           result->verts_num,
           result->faces_num);
+    }
+  }
+
+  if (dense_runtime && result) {
+    const double store_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+    if (BKE_ocean_sampling_snapshot_store(omd->ocean, &dense_runtime->dense_sampling_snapshot)) {
+      if (dense_runtime->dense_cached_result) {
+        BKE_id_free(nullptr, dense_runtime->dense_cached_result);
+      }
+      dense_runtime->dense_cached_result = BKE_mesh_copy_for_eval(*result);
+      dense_runtime->dense_result_key = dense_result_key;
+      dense_runtime->dense_result_key_valid = true;
+      if (profile_enabled) {
+        ocean_camera_lod_profile_logf(object_name,
+                                      "dense_cache_store",
+                                      "total_s=%.6f store_s=%.6f resolution=%d verts=%d faces=%d",
+                                      BLI_time_now_seconds() - profile_start,
+                                      BLI_time_now_seconds() - store_start,
+                                      resolution,
+                                      result->verts_num,
+                                      result->faces_num);
+      }
+    }
+    else {
+      dense_runtime->dense_result_key_valid = false;
     }
   }
 

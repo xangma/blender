@@ -179,6 +179,15 @@ bool BKE_ocean_init(struct Ocean *o,
                     int seed);
 void BKE_ocean_simulate(struct Ocean *o, float t, float scale, float chop_amount);
 
+/* Dense live sampling fields, including normals and Jacobians. FFT plans and
+ * immutable spectral inputs remain owned by the destination Ocean. */
+struct OceanSamplingSnapshot;
+bool BKE_ocean_sampling_snapshot_store(const struct Ocean *o,
+                                       struct OceanSamplingSnapshot **snapshot);
+bool BKE_ocean_sampling_snapshot_restore(struct Ocean *o,
+                                         const struct OceanSamplingSnapshot *snapshot);
+void BKE_ocean_sampling_snapshot_free(struct OceanSamplingSnapshot *snapshot);
+
 float BKE_ocean_jminus_to_foam(float jminus, float coverage);
 /**
  * Sampling the ocean surface.

@@ -20,6 +20,7 @@
 #include "DNA_modifier_types.h"
 #include "DNA_scene_types.h"
 
+#include "BLI_array.hh"
 #include "BLI_math_vector.h"
 #include "BLI_path_utils.hh"
 #include "BLI_rand.h"
@@ -98,6 +99,79 @@ bool BKE_ocean_sample_cuda(Ocean *oc,
 #ifdef WITH_OCEANSIM
 
 /* Ocean code */
+
+struct OceanSamplingSnapshot {
+  int size_x = 0;
+  int size_y = 0;
+  int flags = 0;
+  double normal_y = 0.0;
+  Array<double> fields[8];
+};
+
+static int ocean_sampling_flags(const Ocean *o)
+{
+  return int(o->_do_disp_y) | (int(o->_do_chop) << 1) | (int(o->_do_normals) << 2) |
+         (int(o->_do_jacobian) << 3);
+}
+
+bool BKE_ocean_sampling_snapshot_store(const Ocean *o, OceanSamplingSnapshot **r_snapshot)
+{
+  if (!o || !r_snapshot || o->_do_split || o->_M <= 0 || o->_N <= 0) {
+    return false;
+  }
+  BLI_rw_mutex_lock(const_cast<ThreadRWMutex *>(&o->oceanmutex), THREAD_LOCK_READ);
+  if (!*r_snapshot) {
+    *r_snapshot = MEM_new<OceanSamplingSnapshot>(__func__);
+  }
+  OceanSamplingSnapshot &snapshot = **r_snapshot;
+  snapshot.size_x = o->_M;
+  snapshot.size_y = o->_N;
+  snapshot.flags = ocean_sampling_flags(o);
+  snapshot.normal_y = o->_N_y;
+  const double *fields[] = {
+      o->_disp_y, o->_disp_x, o->_disp_z, o->_N_x, o->_N_z, o->_Jxx, o->_Jzz, o->_Jxz};
+  const int64_t count = int64_t(o->_M) * o->_N;
+  for (int i = 0; i < 8; i++) {
+    snapshot.fields[i].reinitialize(fields[i] ? count : 0);
+    if (fields[i]) {
+      std::memcpy(snapshot.fields[i].data(), fields[i], sizeof(double) * count);
+    }
+  }
+  BLI_rw_mutex_unlock(const_cast<ThreadRWMutex *>(&o->oceanmutex));
+  return true;
+}
+
+bool BKE_ocean_sampling_snapshot_restore(Ocean *o, const OceanSamplingSnapshot *snapshot)
+{
+  if (!o || !snapshot || o->_do_split || o->_M != snapshot->size_x || o->_N != snapshot->size_y ||
+      ocean_sampling_flags(o) != snapshot->flags)
+  {
+    return false;
+  }
+  double *fields[] = {
+      o->_disp_y, o->_disp_x, o->_disp_z, o->_N_x, o->_N_z, o->_Jxx, o->_Jzz, o->_Jxz};
+  const int64_t count = int64_t(o->_M) * o->_N;
+  /* Check every destination before changing any field. */
+  for (int i = 0; i < 8; i++) {
+    if (snapshot->fields[i].size() != (fields[i] ? count : 0)) {
+      return false;
+    }
+  }
+  BLI_rw_mutex_lock(&o->oceanmutex, THREAD_LOCK_WRITE);
+  for (int i = 0; i < 8; i++) {
+    if (fields[i]) {
+      std::memcpy(fields[i], snapshot->fields[i].data(), sizeof(double) * count);
+    }
+  }
+  o->_N_y = snapshot->normal_y;
+  BLI_rw_mutex_unlock(&o->oceanmutex);
+  return true;
+}
+
+void BKE_ocean_sampling_snapshot_free(OceanSamplingSnapshot *snapshot)
+{
+  MEM_delete(snapshot);
+}
 
 static float nextfr(RNG *rng, float min, float max)
 {
@@ -2943,6 +3017,20 @@ void BKE_ocean_bake(Ocean *o,
 }
 
 #else /* WITH_OCEANSIM */
+
+struct OceanSamplingSnapshot {};
+bool BKE_ocean_sampling_snapshot_store(const Ocean *, OceanSamplingSnapshot **)
+{
+  return false;
+}
+bool BKE_ocean_sampling_snapshot_restore(Ocean *, const OceanSamplingSnapshot *)
+{
+  return false;
+}
+void BKE_ocean_sampling_snapshot_free(OceanSamplingSnapshot *snapshot)
+{
+  MEM_delete(snapshot);
+}
 
 float BKE_ocean_jminus_to_foam(float /*jminus*/, float /*coverage*/)
 {
