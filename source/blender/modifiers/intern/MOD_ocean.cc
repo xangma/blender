@@ -43,6 +43,7 @@
 #include "BLI_listbase_wrapper.hh"
 #include "BLI_path_utils.hh"
 #include "BLI_task.h"
+#include "BLI_task.hh"
 #include "BLI_time.h"
 #include "BLI_utildefines.h"
 #include "BLI_array.hh"
@@ -3484,70 +3485,18 @@ static void ocean_camera_lod_balance_leaves(Vector<OceanCameraLODLeaf> &io_leave
   }
 }
 
-static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
-                                          const Span<OceanSplitMomentLevel> moment_levels,
-                                          const OceanCameraLODSettings &settings,
-                                          const OceanSplitRuntimeReadScope *read_scope,
-                                          Vector<OceanCameraLODLeaf> &r_leaves)
+/* Each root is independent. Retain depth-first traversal within a batch so concatenating batches
+ * in reverse root order preserves the original leaf, vertex and face ordering. */
+static void ocean_camera_lod_select_root_leaves(
+    const OceanModifierData *omd,
+    const Span<OceanSplitMomentLevel> moment_levels,
+    const OceanCameraLODSettings &settings,
+    const OceanSplitRuntimeReadScope *read_scope,
+    const Span<OceanCameraLODLeaf> roots,
+    Vector<OceanCameraLODLeaf> &r_leaves)
 {
-  const bool profile_enabled = ocean_camera_lod_profile_enabled();
-  const double profile_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
-  double select_s = 0.0;
-  double balance_s = 0.0;
-
-  r_leaves.clear();
-  if (settings.full_domain_dense || settings.levels.is_empty()) {
-    return;
-  }
-
-  const OceanCameraLODLevel &coarsest_level = settings.levels.last();
-  const int root_stride = coarsest_level.stride;
-  const float dense_cell_size = ocean_camera_lod_dense_cell_size(settings);
-  const float root_cell_size = dense_cell_size * float(root_stride);
-  const float region_min_x = settings.domain_min.x;
-  const float region_max_x = settings.domain_max.x;
-  const float region_min_y = settings.domain_min.y;
-  const float region_max_y = settings.domain_max.y;
-
-  auto root_index_min = [&](const float coord, const float domain_min, const int dense_cells) {
-    return std::clamp(
-        int(floorf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
-        0,
-        std::max(dense_cells - root_stride, 0));
-  };
-  auto root_index_max = [&](const float coord,
-                            const float domain_min,
-                            const int dense_cells,
-                            const int min_index) {
-    return std::clamp(
-        int(ceilf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
-        min_index + root_stride,
-        dense_cells);
-  };
-
-  const int min_x = root_index_min(region_min_x, settings.domain_min.x, settings.dense_cells_x);
-  const int max_x = root_index_max(
-      region_max_x, settings.domain_min.x, settings.dense_cells_x, min_x);
-  const int min_y = root_index_min(region_min_y, settings.domain_min.y, settings.dense_cells_y);
-  const int max_y = root_index_max(
-      region_max_y, settings.domain_min.y, settings.dense_cells_y, min_y);
-
   Vector<OceanCameraLODLeaf> pending;
-  for (int x = min_x; x < max_x; x += root_stride) {
-    for (int y = min_y; y < max_y; y += root_stride) {
-      OceanCameraLODLeaf root{};
-      root.local_level_index = settings.quadtree_levels - 1;
-      root.split_level_index = coarsest_level.split_level_index;
-      root.stride = coarsest_level.stride;
-      root.cell_size = coarsest_level.cell_size;
-      root.min_x = x;
-      root.max_x = std::min(x + root_stride, settings.dense_cells_x);
-      root.min_y = y;
-      root.max_y = std::min(y + root_stride, settings.dense_cells_y);
-      pending.append(root);
-    }
-  }
-
+  pending.extend(roots);
   while (!pending.is_empty()) {
     OceanCameraLODLeaf leaf = pending.pop_last();
     const float2 leaf_region_min = ocean_camera_lod_leaf_region_min(settings, leaf);
@@ -3621,6 +3570,124 @@ static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
     }
     else {
       ocean_camera_lod_append_leaf_children(leaf, pending);
+    }
+  }
+
+}
+
+static void ocean_camera_lod_build_leaves(const OceanModifierData *omd,
+                                          const Span<OceanSplitMomentLevel> moment_levels,
+                                          const OceanCameraLODSettings &settings,
+                                          const OceanSplitRuntimeReadScope *read_scope,
+                                          Vector<OceanCameraLODLeaf> &r_leaves)
+{
+  const bool profile_enabled = ocean_camera_lod_profile_enabled();
+  const double profile_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+  double select_s = 0.0;
+  double balance_s = 0.0;
+
+  r_leaves.clear();
+  if (settings.full_domain_dense || settings.levels.is_empty()) {
+    return;
+  }
+
+  const OceanCameraLODLevel &coarsest_level = settings.levels.last();
+  const int root_stride = coarsest_level.stride;
+  const float dense_cell_size = ocean_camera_lod_dense_cell_size(settings);
+  const float root_cell_size = dense_cell_size * float(root_stride);
+  const float region_min_x = settings.domain_min.x;
+  const float region_max_x = settings.domain_max.x;
+  const float region_min_y = settings.domain_min.y;
+  const float region_max_y = settings.domain_max.y;
+
+  auto root_index_min = [&](const float coord, const float domain_min, const int dense_cells) {
+    return std::clamp(
+        int(floorf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
+        0,
+        std::max(dense_cells - root_stride, 0));
+  };
+  auto root_index_max = [&](const float coord,
+                            const float domain_min,
+                            const int dense_cells,
+                            const int min_index) {
+    return std::clamp(
+        int(ceilf((coord - domain_min) / std::max(root_cell_size, 1.0e-6f))) * root_stride,
+        min_index + root_stride,
+        dense_cells);
+  };
+
+  const int min_x = root_index_min(region_min_x, settings.domain_min.x, settings.dense_cells_x);
+  const int max_x = root_index_max(
+      region_max_x, settings.domain_min.x, settings.dense_cells_x, min_x);
+  const int min_y = root_index_min(region_min_y, settings.domain_min.y, settings.dense_cells_y);
+  const int max_y = root_index_max(
+      region_max_y, settings.domain_min.y, settings.dense_cells_y, min_y);
+
+  Vector<OceanCameraLODLeaf> roots;
+  for (int x = min_x; x < max_x; x += root_stride) {
+    for (int y = min_y; y < max_y; y += root_stride) {
+      OceanCameraLODLeaf root{};
+      root.local_level_index = settings.quadtree_levels - 1;
+      root.split_level_index = coarsest_level.split_level_index;
+      root.stride = coarsest_level.stride;
+      root.cell_size = coarsest_level.cell_size;
+      root.min_x = x;
+      root.max_x = std::min(x + root_stride, settings.dense_cells_x);
+      root.min_y = y;
+      root.max_y = std::min(y + root_stride, settings.dense_cells_y);
+      roots.append(root);
+    }
+  }
+
+  constexpr int roots_per_batch = 256;
+  const int batches_num = int((roots.size() + roots_per_batch - 1) / roots_per_batch);
+  if (batches_num <= 1 || BLI_task_scheduler_num_threads() == 1) {
+    ocean_camera_lod_select_root_leaves(
+        omd, moment_levels, settings, read_scope, roots, r_leaves);
+  }
+  else {
+    Array<Vector<OceanCameraLODLeaf>> batch_leaves(batches_num);
+    const bool region_profile_enabled = g_ocean_camera_lod_region_profile_active;
+    Array<OceanCameraLODRegionProfile> batch_profiles(region_profile_enabled ? batches_num : 0);
+    threading::parallel_for(IndexRange(batches_num), 1, [&](const IndexRange batches) {
+      for (const int batch : batches) {
+        const int start = batch * roots_per_batch;
+        const int size = std::min(roots_per_batch, int(roots.size()) - start);
+        const bool saved_profile_active = g_ocean_camera_lod_region_profile_active;
+        const OceanCameraLODRegionProfile saved_profile = g_ocean_camera_lod_region_profile;
+        g_ocean_camera_lod_region_profile_active = region_profile_enabled;
+        g_ocean_camera_lod_region_profile = {};
+        ocean_camera_lod_select_root_leaves(omd,
+                                           moment_levels,
+                                           settings,
+                                           read_scope,
+                                           roots.as_span().slice(start, size),
+                                           batch_leaves[batch]);
+        if (region_profile_enabled) {
+          batch_profiles[batch] = g_ocean_camera_lod_region_profile;
+        }
+        g_ocean_camera_lod_region_profile_active = saved_profile_active;
+        g_ocean_camera_lod_region_profile = saved_profile;
+      }
+    });
+
+    int64_t leaves_num = 0;
+    for (const Vector<OceanCameraLODLeaf> &leaves : batch_leaves) {
+      leaves_num += leaves.size();
+    }
+    r_leaves.reserve(leaves_num);
+    for (int batch = batches_num - 1; batch >= 0; batch--) {
+      r_leaves.extend(batch_leaves[batch]);
+      /* Release each batch as it is merged to limit temporary leaf storage. */
+      batch_leaves[batch].clear_and_shrink();
+      if (region_profile_enabled) {
+        const OceanCameraLODRegionProfile &profile = batch_profiles[batch];
+        g_ocean_camera_lod_region_profile.call_count += profile.call_count;
+        g_ocean_camera_lod_region_profile.sample_count += profile.sample_count;
+        g_ocean_camera_lod_region_profile.sample_eval_count += profile.sample_eval_count;
+        g_ocean_camera_lod_region_profile.total_s += profile.total_s;
+        g_ocean_camera_lod_region_profile.sample_eval_s += profile.sample_eval_s;
+      }
     }
   }
 
