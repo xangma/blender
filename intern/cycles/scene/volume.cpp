@@ -865,39 +865,31 @@ static bool mesh_is_closed(const std::vector<openvdb::Vec3I> &triangles)
     return false;
   }
 
-  /* Store the two vertices that forms an edge. */
-  std::multiset<std::pair<int, int>> edges;
-  int num_edges = 0;
+  /* Track both directions of each undirected edge. A closed, consistently oriented mesh has
+   * exactly one edge in each direction. Keep completed edges to reject non-manifold faces. */
+  unordered_map<uint64_t, uint8_t> edges;
+  edges.reserve(num_triangles * 2);
+  size_t num_paired_edges = 0;
 
   for (const auto &tri : triangles) {
     for (int i = 0; i < 3; i++) {
-      const std::pair<int, int> e = {tri[i], tri[(i + 1) % 3]};
-      if (edges.contains(e)) {
-        /* Same edge exists. */
-        return false;
-      }
-
-      /* Check if an edge in the opposite order exists. */
-      const auto count = edges.count({e.second, e.first});
-      if (count > 1) {
-        /* Edge has more than 2 incident faces. */
-        return false;
-      }
-      if (count == 1) {
-        /* If an edge in the opposite order exists, increment the count. */
-        edges.insert({e.second, e.first});
-      }
-      else {
-        /* Insert a new edge. */
-        num_edges++;
-        edges.insert(e);
+      const int v0 = tri[i];
+      const int v1 = tri[(i + 1) % 3];
+      const uint64_t key = (uint64_t(uint32_t(min(v0, v1))) << 32) | uint32_t(max(v0, v1));
+      const uint8_t direction = v0 < v1 ? 1 : 2;
+      const auto [it, inserted] = edges.try_emplace(key, direction);
+      if (!inserted) {
+        if (it->second & direction) {
+          /* Duplicate direction or more than two incident faces. */
+          return false;
+        }
+        it->second |= direction;
+        num_paired_edges++;
       }
     }
   }
 
-  /* Until this point, the count of each element in the set is at most 2; to check if they are
-   * exactly 2, we just need to compare the total numbers. */
-  return num_triangles * 3 == num_edges * 2;
+  return num_paired_edges == edges.size();
 }
 
 openvdb::BoolGrid::ConstPtr VolumeManager::mesh_to_sdf_grid(const Mesh *mesh,
