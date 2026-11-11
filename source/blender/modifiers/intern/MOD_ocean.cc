@@ -3366,6 +3366,10 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
     return false;
   }
 
+  const bool profile_enabled = ocean_camera_lod_profile_enabled();
+  const double start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+  const int input_leaves = int(io_leaves.size());
+
   Array<int> leaf_owner_cell_map(size_t(dense_cells_x) * size_t(dense_cells_y));
   leaf_owner_cell_map.as_mutable_span().fill(-1);
   auto dense_cell_index = [&](const int dense_x, const int dense_y) {
@@ -3381,8 +3385,9 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
     }
   }
 
+  const double owner_end = profile_enabled ? BLI_time_now_seconds() : 0.0;
   Array<bool> split_leaf(io_leaves.size(), false);
-  bool needs_split = false;
+  int split_leaves_num = 0;
 
   auto has_unbalanced_neighbor = [&](const int leaf_index, const OceanCameraLODEdge edge) {
     const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
@@ -3451,26 +3456,72 @@ static bool ocean_camera_lod_balance_leaves_once(Vector<OceanCameraLODLeaf> &io_
         has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::North) ||
         has_unbalanced_neighbor(leaf_index, OceanCameraLODEdge::West)) {
       split_leaf[leaf_index] = true;
-      needs_split = true;
+      split_leaves_num++;
     }
   }
 
-  if (!needs_split) {
+  const double check_end = profile_enabled ? BLI_time_now_seconds() : 0.0;
+  auto log_pass = [&]() {
+    if (profile_enabled) {
+      ocean_camera_lod_profile_logf("<settings>",
+                                    "balance_pass",
+                                    "owner_s=%.6f check_s=%.6f copy_s=%.6f input=%d output=%d",
+                                    owner_end - start,
+                                    check_end - owner_end,
+                                    BLI_time_now_seconds() - check_end,
+                                    input_leaves,
+                                    int(io_leaves.size()));
+    }
+  };
+  if (split_leaves_num == 0) {
+    log_pass();
     return false;
   }
 
-  Vector<OceanCameraLODLeaf> balanced;
-  balanced.reserve(io_leaves.size());
-  for (const int leaf_index : io_leaves.index_range()) {
-    const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
-    if (split_leaf[leaf_index]) {
-      ocean_camera_lod_append_leaf_children(leaf, balanced);
+  /* Splitting adds three leaves. Reserve the exact result instead of growing and copying the
+   * entire vector again, even when only a handful of leaves split in a late balancing pass. */
+  Vector<OceanCameraLODLeaf> balanced(io_leaves.size() + int64_t(3) * split_leaves_num);
+  constexpr int leaves_per_task = 4096;
+  const int tasks_num = int((io_leaves.size() + leaves_per_task - 1) / leaves_per_task);
+  Array<int64_t> task_offsets(tasks_num + 1);
+  task_offsets[0] = 0;
+  for (const int task : IndexRange(tasks_num)) {
+    const int start = task * leaves_per_task;
+    const int size = std::min(leaves_per_task, int(io_leaves.size()) - start);
+    int64_t output_size = size;
+    for (const int leaf_index : IndexRange(start, size)) {
+      output_size += split_leaf[leaf_index] ? 3 : 0;
     }
-    else {
-      balanced.append(leaf);
-    }
+    task_offsets[task + 1] = task_offsets[task] + output_size;
   }
+  BLI_assert(task_offsets.last() == balanced.size());
+
+  /* Each task writes to a disjoint, predetermined range. Keep the original leaf order and use
+   * the same child construction as selection, including resetting children's error statistics. */
+  threading::parallel_for(IndexRange(tasks_num), 1, [&](const IndexRange tasks) {
+    Vector<OceanCameraLODLeaf> children;
+    for (const int task : tasks) {
+      const int start = task * leaves_per_task;
+      const int size = std::min(leaves_per_task, int(io_leaves.size()) - start);
+      int64_t output_index = task_offsets[task];
+      for (const int leaf_index : IndexRange(start, size)) {
+        const OceanCameraLODLeaf &leaf = io_leaves[leaf_index];
+        if (split_leaf[leaf_index]) {
+          children.clear();
+          ocean_camera_lod_append_leaf_children(leaf, children);
+          for (const OceanCameraLODLeaf &child : children) {
+            balanced[output_index++] = child;
+          }
+        }
+        else {
+          balanced[output_index++] = leaf;
+        }
+      }
+      BLI_assert(output_index == task_offsets[task + 1]);
+    }
+  });
   io_leaves = std::move(balanced);
+  log_pass();
   return true;
 }
 
