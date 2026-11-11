@@ -865,6 +865,22 @@ static bool mesh_is_closed(const std::vector<openvdb::Vec3I> &triangles)
     return false;
   }
 
+  /* Every edge of a closed, consistently oriented mesh occurs once in each direction, so its
+   * unsigned contributions cancel modulo 2^64. A nonzero sum proves the mesh is open without
+   * allocating an edge table. Zero is inconclusive and still requires the exact check below. */
+  uint64_t edge_checksum = 0;
+  for (const auto &tri : triangles) {
+    for (int i = 0; i < 3; i++) {
+      const int v0 = tri[i];
+      const int v1 = tri[(i + 1) % 3];
+      const uint64_t key = (uint64_t(uint32_t(min(v0, v1))) << 32) | uint32_t(max(v0, v1));
+      edge_checksum += v0 < v1 ? key : -key;
+    }
+  }
+  if (edge_checksum != 0) {
+    return false;
+  }
+
   /* Track both directions of each undirected edge. A closed, consistently oriented mesh has
    * exactly one edge in each direction. Keep completed edges to reject non-manifold faces. */
   unordered_map<uint64_t, uint8_t> edges;
@@ -896,13 +912,6 @@ openvdb::BoolGrid::ConstPtr VolumeManager::mesh_to_sdf_grid(const Mesh *mesh,
                                                             const Shader *shader,
                                                             const float half_width)
 {
-  const int num_verts = mesh->num_verts();
-  std::vector<openvdb::Vec3f> points(num_verts);
-  parallel_for(0, num_verts, [&](int i) {
-    const float3 &vert = mesh->get_position()[i];
-    points[i] = openvdb::Vec3f(vert.x, vert.y, vert.z);
-  });
-
   const int max_num_triangles = mesh->num_triangles();
   std::vector<openvdb::Vec3I> triangles;
   triangles.reserve(max_num_triangles);
@@ -921,6 +930,13 @@ openvdb::BoolGrid::ConstPtr VolumeManager::mesh_to_sdf_grid(const Mesh *mesh,
      * the mesh. Evaluate the whole bounding box in this case. */
     return openvdb::BoolGrid::create();
   }
+
+  const int num_verts = mesh->num_verts();
+  std::vector<openvdb::Vec3f> points(num_verts);
+  parallel_for(0, num_verts, [&](int i) {
+    const float3 &vert = mesh->get_position()[i];
+    points[i] = openvdb::Vec3f(vert.x, vert.y, vert.z);
+  });
 
   /* TODO(weizhen): Should consider object instead of mesh size. */
   const float3 mesh_size = mesh->bounds.size();
