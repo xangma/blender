@@ -32,6 +32,24 @@ void CUDADeviceKernels::load(CUDADevice *device)
           device,
           cuOccupancyMaxPotentialBlockSize(
               &kernel.min_blocks, &kernel.num_threads_per_block, kernel.function, nullptr, 0, 0));
+
+      /* Smaller blocks improve scheduling of the variable shadow shading workload on Ada.
+       * Keep the same potential resident thread count as the default occupancy choice. */
+      if (i == DEVICE_KERNEL_INTEGRATOR_SHADE_SHADOW && device->cuDevArchitecture == 890 &&
+          kernel.num_threads_per_block == 384)
+      {
+        int min_blocks = 0;
+        int num_threads_per_block = 0;
+        cuda_device_assert(device,
+                           cuOccupancyMaxPotentialBlockSize(
+                               &min_blocks, &num_threads_per_block, kernel.function, nullptr, 0, 192));
+        if (num_threads_per_block == 192 &&
+            min_blocks * num_threads_per_block >= kernel.min_blocks * kernel.num_threads_per_block)
+        {
+          kernel.min_blocks = min_blocks;
+          kernel.num_threads_per_block = num_threads_per_block;
+        }
+      }
     }
     else {
       LOG_ERROR << "Unable to load kernel " << function_name;
