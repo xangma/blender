@@ -6,6 +6,7 @@
  * Adapted code from NVIDIA Corporation. */
 
 #include <algorithm>
+#include <array>
 
 #include "bvh/bvh2.h"
 
@@ -19,6 +20,7 @@
 #include "bvh/unaligned.h"
 
 #include "util/progress.h"
+#include "util/task.h"
 
 CCL_NAMESPACE_BEGIN
 
@@ -222,23 +224,67 @@ void BVH2::pack_unaligned_node(const int idx,
 
 void BVH2::pack_nodes(const BVHNode *root)
 {
-  const size_t num_nodes = root->getSubtreeSize(BVH_STAT_NODE_COUNT);
-  const size_t num_leaf_nodes = root->getSubtreeSize(BVH_STAT_LEAF_COUNT);
-  assert(num_leaf_nodes <= num_nodes);
-  const size_t num_inner_nodes = num_nodes - num_leaf_nodes;
-  size_t node_size;
-  if (params.use_unaligned_nodes) {
-    const size_t num_unaligned_nodes = root->getSubtreeSize(BVH_STAT_UNALIGNED_INNER_COUNT);
-    node_size = (num_unaligned_nodes * BVH_UNALIGNED_NODE_SIZE) +
-                (num_inner_nodes - num_unaligned_nodes) * BVH_NODE_SIZE;
+  struct Subtree {
+    const BVHNode *node;
+    int nodes = 0;
+    int leaves = 0;
+    int unaligned = 0;
+    BVHStackEntry entry;
+    int node_begin = 0, node_end = 0;
+    int leaf_begin = 0, leaf_end = 0;
+  };
+
+  /* Count independent subtrees in parallel. Keep their order consistent with the stack traversal
+   * below, which visits child 1 before child 0. Small trees retain serial counting and packing. */
+  vector<Subtree> subtrees;
+  size_t prefix_nodes = 0, prefix_unaligned = 0;
+  if (TaskScheduler::max_concurrency() > 1) {
+    auto collect_subtrees = [&](auto &&self, const BVHNode *node, const int depth) -> void {
+      if (depth == 0 || node->is_leaf()) {
+        subtrees.push_back({node});
+        return;
+      }
+      prefix_nodes++;
+      prefix_unaligned += params.use_unaligned_nodes && node->has_unaligned();
+      self(self, node->get_child(1), depth - 1);
+      self(self, node->get_child(0), depth - 1);
+    };
+    collect_subtrees(collect_subtrees, root, 6);
+  }
+  const bool parallel = subtrees.size() >= 32;
+  size_t num_nodes, num_leaf_nodes, num_unaligned_nodes = 0;
+  if (parallel) {
+    parallel_for(size_t(0), subtrees.size(), [&](const size_t i) {
+      Subtree &subtree = subtrees[i];
+      subtree.nodes = subtree.node->getSubtreeSize(BVH_STAT_NODE_COUNT);
+      subtree.leaves = subtree.node->getSubtreeSize(BVH_STAT_LEAF_COUNT);
+      if (params.use_unaligned_nodes) {
+        subtree.unaligned = subtree.node->getSubtreeSize(BVH_STAT_UNALIGNED_INNER_COUNT);
+      }
+    });
+    num_nodes = prefix_nodes;
+    num_leaf_nodes = 0;
+    num_unaligned_nodes = prefix_unaligned;
+    for (const Subtree &subtree : subtrees) {
+      num_nodes += subtree.nodes;
+      num_leaf_nodes += subtree.leaves;
+      num_unaligned_nodes += subtree.unaligned;
+    }
   }
   else {
-    node_size = num_inner_nodes * BVH_NODE_SIZE;
+    num_nodes = root->getSubtreeSize(BVH_STAT_NODE_COUNT);
+    num_leaf_nodes = root->getSubtreeSize(BVH_STAT_LEAF_COUNT);
+    if (params.use_unaligned_nodes) {
+      num_unaligned_nodes = root->getSubtreeSize(BVH_STAT_UNALIGNED_INNER_COUNT);
+    }
   }
-  /* Resize arrays */
+  assert(num_leaf_nodes <= num_nodes);
+  const size_t num_inner_nodes = num_nodes - num_leaf_nodes;
+  const size_t node_size = num_unaligned_nodes * BVH_UNALIGNED_NODE_SIZE +
+                           (num_inner_nodes - num_unaligned_nodes) * BVH_NODE_SIZE;
+
   pack.nodes.clear();
   pack.leaf_nodes.clear();
-  /* For top level BVH, first merge existing BVH's so we know the offsets. */
   if (params.top_level) {
     pack_instances(node_size, num_leaf_nodes * BVH_NODE_LEAF_SIZE);
   }
@@ -247,51 +293,102 @@ void BVH2::pack_nodes(const BVHNode *root)
     pack.leaf_nodes.resize(num_leaf_nodes * BVH_NODE_LEAF_SIZE);
   }
 
-  int nextNodeIdx = 0;
-  int nextLeafNodeIdx = 0;
+  auto pack_children = [&](const BVHStackEntry &e, int &next_node, int &next_leaf) {
+    int idx[2];
+    for (int i = 0; i < 2; ++i) {
+      if (e.node->get_child(i)->is_leaf()) {
+        idx[i] = next_leaf++;
+      }
+      else {
+        idx[i] = next_node;
+        next_node += e.node->get_child(i)->has_unaligned() ? BVH_UNALIGNED_NODE_SIZE :
+                                                              BVH_NODE_SIZE;
+      }
+    }
+    const std::array<BVHStackEntry, 2> children = {
+        BVHStackEntry(e.node->get_child(0), idx[0]),
+        BVHStackEntry(e.node->get_child(1), idx[1]),
+    };
+    pack_inner(e, children[0], children[1]);
+    return children;
+  };
 
-  vector<BVHStackEntry> stack;
-  stack.reserve(BVHParams::MAX_DEPTH * 2);
-  if (root->is_leaf()) {
-    stack.push_back(BVHStackEntry(root, nextLeafNodeIdx++));
+  auto pack_subtree = [&](const BVHStackEntry &entry,
+                          int next_node,
+                          int next_leaf,
+                          [[maybe_unused]] const int node_end,
+                          [[maybe_unused]] const int leaf_end) {
+    vector<BVHStackEntry> stack;
+    stack.reserve(BVHParams::MAX_DEPTH * 2);
+    stack.push_back(entry);
+    while (!stack.empty()) {
+      const BVHStackEntry e = stack.back();
+      stack.pop_back();
+      if (e.node->is_leaf()) {
+        pack_leaf(e, static_cast<const LeafNode *>(e.node));
+      }
+      else {
+        const auto children = pack_children(e, next_node, next_leaf);
+        stack.push_back(children[0]);
+        stack.push_back(children[1]);
+      }
+    }
+    assert(next_node == node_end);
+    assert(next_leaf == leaf_end);
+  };
+
+  int next_node = root->is_leaf() ? 0 :
+                                  (root->has_unaligned() ? BVH_UNALIGNED_NODE_SIZE : BVH_NODE_SIZE);
+  int next_leaf = root->is_leaf() ? 1 : 0;
+  if (!parallel) {
+    pack_subtree(BVHStackEntry(root, 0), next_node, next_leaf, node_size, num_leaf_nodes);
   }
   else {
-    stack.push_back(BVHStackEntry(root, nextNodeIdx));
-    nextNodeIdx += root->has_unaligned() ? BVH_UNALIGNED_NODE_SIZE : BVH_NODE_SIZE;
-  }
-
-  while (!stack.empty()) {
-    const BVHStackEntry e = stack.back();
-    stack.pop_back();
-
-    if (e.node->is_leaf()) {
-      /* leaf node */
-      const LeafNode *leaf = reinterpret_cast<const LeafNode *>(e.node);
-      pack_leaf(e, leaf);
-    }
-    else {
-      /* inner node */
-      int idx[2];
-      for (int i = 0; i < 2; ++i) {
-        if (e.node->get_child(i)->is_leaf()) {
-          idx[i] = nextLeafNodeIdx++;
+    /* Assign exactly the indices of the original traversal. A frontier root already received its
+     * index from its parent; only its descendants consume the reserved ranges. Instance data was
+     * merged above and lies beyond these ranges. Workers never resize or append to shared arrays. */
+    vector<BVHStackEntry> stack;
+    stack.reserve(BVHParams::MAX_DEPTH * 2);
+    stack.emplace_back(root, 0);
+    size_t subtree_index = 0;
+    while (!stack.empty()) {
+      const BVHStackEntry e = stack.back();
+      stack.pop_back();
+      if (subtree_index < subtrees.size() && e.node == subtrees[subtree_index].node) {
+        Subtree &subtree = subtrees[subtree_index++];
+        subtree.entry = e;
+        subtree.node_begin = next_node;
+        subtree.leaf_begin = next_leaf;
+        next_node += subtree.unaligned * BVH_UNALIGNED_NODE_SIZE +
+                     (subtree.nodes - subtree.leaves - subtree.unaligned) * BVH_NODE_SIZE;
+        if (!e.node->is_leaf()) {
+          next_node -= e.node->has_unaligned() ? BVH_UNALIGNED_NODE_SIZE : BVH_NODE_SIZE;
         }
-        else {
-          idx[i] = nextNodeIdx;
-          nextNodeIdx += e.node->get_child(i)->has_unaligned() ? BVH_UNALIGNED_NODE_SIZE :
-                                                                 BVH_NODE_SIZE;
-        }
+        next_leaf += subtree.leaves - int(e.node->is_leaf());
+        subtree.node_end = next_node;
+        subtree.leaf_end = next_leaf;
       }
-
-      stack.push_back(BVHStackEntry(e.node->get_child(0), idx[0]));
-      stack.push_back(BVHStackEntry(e.node->get_child(1), idx[1]));
-
-      pack_inner(e, stack[stack.size() - 2], stack[stack.size() - 1]);
+      else {
+        assert(!e.node->is_leaf());
+        const auto children = pack_children(e, next_node, next_leaf);
+        stack.push_back(children[0]);
+        stack.push_back(children[1]);
+      }
     }
+    assert(subtree_index == subtrees.size());
+    assert(next_node == node_size);
+    assert(next_leaf == num_leaf_nodes);
+    parallel_for(size_t(0), subtrees.size(), [&](const size_t i) {
+      const Subtree &subtree = subtrees[i];
+      pack_subtree(subtree.entry,
+                   subtree.node_begin,
+                   subtree.leaf_begin,
+                   subtree.node_end,
+                   subtree.leaf_end);
+    });
   }
-  assert(node_size == nextNodeIdx);
-  /* root index to start traversal at, to handle case of single leaf node */
-  pack.root_index = (root->is_leaf()) ? -1 : 0;
+  /* Root index to start traversal at, to handle the case of a single leaf node. */
+  pack.root_index = root->is_leaf() ? -1 : 0;
 }
 
 void BVH2::refit_nodes()
