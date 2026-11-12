@@ -54,9 +54,13 @@ function(cuda_add_common_flags cuda_version arch in_flags out_flags)
     set(flags ${flags} -D WITH_NANOVDB)
   endif()
 
-  if("${cuda_version}" GREATER_EQUAL 123 AND "${arch}" STREQUAL "sm_120")
+  if("${cuda_version}" GREATER_EQUAL 123)
     # Enable jump table generation for the SVM switch statement.
-    set(flags ${flags} --jump-table-density 80)
+    if("${arch}" STREQUAL "sm_89")
+      set(flags ${flags} --jump-table-density=0)
+    elseif("${arch}" STREQUAL "sm_120")
+      set(flags ${flags} --jump-table-density 80)
+    endif()
   endif()
 
   if(NOT WITH_CYCLES_CUDA_BUILD_SERIAL AND "${cuda_version}" GREATER_EQUAL 129)
