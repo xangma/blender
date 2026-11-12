@@ -111,6 +111,24 @@ ccl_device void svm_eval_nodes(KernelGlobals kg,
   Spectrum closure_weight = zero_spectrum();
   int offset = (sd->shader & SHADER_MASK) * (1 + sizeof(SVMNodeShaderJump) / sizeof(uint));
 
+  /* Every shader entry starts with a jump node. Resolve its entry point directly, rather than
+   * executing an extra interpreter iteration for every shader evaluation. */
+  kernel_assert(kernel_data_fetch(svm_nodes, offset) == NODE_SHADER_JUMP);
+  offset++;
+  const SVMNodeShaderJump jump = svm_node_get<SVMNodeShaderJump>(kg, &offset);
+  if (type == SHADER_TYPE_SURFACE) {
+    offset = jump.offset_surface;
+  }
+  else if (type == SHADER_TYPE_VOLUME) {
+    offset = jump.offset_volume;
+  }
+  else if (type == SHADER_TYPE_DISPLACEMENT) {
+    offset = jump.offset_displacement;
+  }
+  else {
+    return;
+  }
+
   while (true) {
     const uint node_type = kernel_data_fetch(svm_nodes, offset++);
 
