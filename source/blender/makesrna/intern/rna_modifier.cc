@@ -1443,6 +1443,22 @@ static int rna_OceanModifier_spectrum_implementation_version_get(PointerRNA *ptr
              1;
 }
 
+static float rna_OceanModifier_realsea_peak_enhancement_get(PointerRNA *ptr)
+{
+  const OceanModifierData *omd = static_cast<const OceanModifierData *>(ptr->data);
+  /* Match the RealSea kernel, including the default in existing saved files. */
+  return omd->sharpen_peak_jonswap == 0.0f ?
+             3.3f :
+             std::clamp(omd->sharpen_peak_jonswap * 10.0f, 1.0f, 6.0f);
+}
+
+static void rna_OceanModifier_realsea_peak_enhancement_set(PointerRNA *ptr, float value)
+{
+  OceanModifierData *omd = static_cast<OceanModifierData *>(ptr->data);
+  /* Keep the existing storage so legacy RNA and saved files remain compatible. */
+  omd->sharpen_peak_jonswap = std::clamp(value, 1.0f, 6.0f) / 10.0f;
+}
+
 static void rna_OceanModifier_init_update(Main *bmain, Scene *scene, PointerRNA *ptr)
 {
   OceanModifierData *omd = static_cast<OceanModifierData *>(ptr->data);
@@ -6974,7 +6990,10 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_range(prop, 1, 1024);
   RNA_def_property_ui_range(prop, 1, 32, 1, -1);
   RNA_def_property_ui_text(
-      prop, "Render Resolution", "Resolution of the generated surface for rendering and baking");
+      prop,
+      "Render Resolution",
+      "Simulation grid has resolution squared samples per axis for rendering and baking; "
+      "Camera LOD reduces mesh detail but retains the dense FFT simulation");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "viewport_resolution", PROP_INT, PROP_UNSIGNED);
@@ -6983,7 +7002,10 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_range(prop, 1, 1024);
   RNA_def_property_ui_range(prop, 1, 32, 1, -1);
   RNA_def_property_ui_text(
-      prop, "Viewport Resolution", "Viewport resolution of the generated surface");
+      prop,
+      "Viewport Resolution",
+      "Simulation grid has resolution squared samples per axis in the viewport; "
+      "Camera LOD reduces mesh detail but retains the dense FFT simulation");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "spatial_size", PROP_INT, PROP_NONE);
@@ -7000,7 +7022,10 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
   RNA_def_property_float_sdna(prop, nullptr, "wind_velocity");
   RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
   RNA_def_property_ui_text(
-      prop, "Wind Velocity", "Wind speed in m/s (RealSea uses wind measured at 19.5 m height)");
+      prop,
+      "Wind Velocity",
+      "Wind speed in m/s; RealSea uses the speed measured at 19.5 m height (U19.5), "
+      "not the 10 m reference speed");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "damping", PROP_FLOAT, PROP_FACTOR);
@@ -7033,7 +7058,11 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
 
   prop = RNA_def_property(srna, "wave_scale", PROP_FLOAT, PROP_UNSIGNED);
   RNA_def_property_float_sdna(prop, nullptr, "wave_scale");
-  RNA_def_property_ui_text(prop, "Wave Scale", "Scale of the displacement effect");
+  RNA_def_property_ui_text(
+      prop,
+      "Wave Scale",
+      "Displacement amplitude gain; 1 gives the unscaled RealSea model and variance changes "
+      "by gain squared. Legacy spectra also use initial peak-height normalization");
   RNA_def_property_update(prop, 0, "rna_Modifier_update");
 
   prop = RNA_def_property(srna, "use_wave_scale", PROP_BOOLEAN, PROP_NONE);
@@ -7124,6 +7153,21 @@ static void rna_def_modifier_ocean(BlenderRNA *brna)
                            "Sharpen Peak",
                            "Peak enhancement gamma divided by 10 for JONSWAP, TMA and RealSea "
                            "JONSWAP; RealSea uses gamma 3.3 when this is zero");
+  RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
+
+  prop = RNA_def_property(srna, "realsea_peak_enhancement", PROP_FLOAT, PROP_NONE);
+  RNA_def_property_clear_flag(prop, PROP_ANIMATABLE);
+  RNA_def_property_range(prop, 1.0f, 6.0f);
+  RNA_def_property_ui_range(prop, 1.0f, 6.0f, 10.0f, 2);
+  RNA_def_property_float_funcs(prop,
+                               "rna_OceanModifier_realsea_peak_enhancement_get",
+                               "rna_OceanModifier_realsea_peak_enhancement_set",
+                               nullptr);
+  RNA_def_property_float_default(prop, 3.3f);
+  RNA_def_property_ui_text(prop,
+                           "Peak Enhancement (Gamma)",
+                           "Physical peak enhancement for RealSea JONSWAP; 1 is no enhancement "
+                           "and 3.3 is the default. Larger values sharpen the spectral peak");
   RNA_def_property_update(prop, 0, "rna_OceanModifier_init_update");
 
   prop = RNA_def_property(srna, "realsea_fmin", PROP_FLOAT, PROP_NONE);

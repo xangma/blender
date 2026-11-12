@@ -663,6 +663,11 @@ if(TEST_SRC_DIR_EXISTS)
 
   if(WITH_MOD_OCEANSIM)
     add_blender_test(
+      physics_ocean_controls
+      --python ${TEST_PYTHON_DIR}/physics_ocean_controls.py
+    )
+
+    add_blender_test(
       physics_ocean_realsea
       --python ${TEST_PYTHON_DIR}/physics_ocean_realsea.py
     )

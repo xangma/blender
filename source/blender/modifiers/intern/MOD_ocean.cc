@@ -5177,7 +5177,22 @@ static void update_depsgraph(ModifierData *md, const ModifierUpdateDepsgraphCont
   UNUSED_VARS(md, ctx);
 #endif
 }
-// #define WITH_OCEANSIM
+#ifdef WITH_OCEANSIM
+static void ocean_fft_grid_info_draw(ui::Layout &layout, const int resolution, const char *format)
+{
+  const int side = resolution * resolution;
+  const uint64_t samples = uint64_t(side) * uint64_t(side);
+  char label[128];
+  std::snprintf(label, sizeof(label), format, side, side);
+  layout.label(label, ICON_NONE);
+  std::snprintf(label,
+                sizeof(label),
+                IFACE_("%llu simulation samples"),
+                static_cast<unsigned long long>(samples));
+  layout.label(label, ICON_NONE);
+}
+#endif
+
 static void panel_draw(const bContext * /*C*/, Panel *panel)
 {
   ui::Layout &layout = *panel->layout;
@@ -5199,7 +5214,10 @@ static void panel_draw(const bContext * /*C*/, Panel *panel)
 
   ui::Layout &sub = col.column(true);
   sub.prop(ptr, "viewport_resolution", UI_ITEM_NONE, IFACE_("Resolution Viewport"), ICON_NONE);
+  ocean_fft_grid_info_draw(
+      sub, RNA_int_get(ptr, "viewport_resolution"), IFACE_("Viewport FFT: %d x %d"));
   sub.prop(ptr, "resolution", UI_ITEM_NONE, IFACE_("Render"), ICON_NONE);
+  ocean_fft_grid_info_draw(sub, RNA_int_get(ptr, "resolution"), IFACE_("Render FFT: %d x %d"));
 
   col.prop(ptr, "time", UI_ITEM_NONE, std::nullopt, ICON_NONE);
 
@@ -5231,15 +5249,33 @@ static void waves_panel_draw(const bContext * /*C*/, Panel *panel)
   layout.use_property_split_set(true);
 
   ui::Layout *col = &layout.column(false);
-  col->prop(ptr, "use_wave_scale", UI_ITEM_NONE, IFACE_("Use Scale"), ICON_NONE);
+  col->prop(ptr,
+            "use_wave_scale",
+            UI_ITEM_NONE,
+            use_realsea ? IFACE_("Use Amplitude Gain") : IFACE_("Use Scale"),
+            ICON_NONE);
   ui::Layout *sub = &col->column(false);
   sub->active_set(RNA_boolean_get(ptr, "use_wave_scale"));
-  sub->prop(ptr, "wave_scale", UI_ITEM_NONE, IFACE_("Scale"), ICON_NONE);
+  sub->prop(ptr,
+            "wave_scale",
+            UI_ITEM_NONE,
+            use_realsea ? IFACE_("Amplitude Gain") : IFACE_("Scale"),
+            ICON_NONE);
+  if (use_realsea) {
+    sub->label(RPT_("1 = unscaled RealSea model"), ICON_INFO);
+  }
   ui::Layout &cutoff = col->column(false);
   cutoff.active_set(!use_realsea);
   cutoff.prop(ptr, "wave_scale_min", UI_ITEM_NONE, std::nullopt, ICON_NONE);
   col->prop(ptr, "choppiness", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-  col->prop(ptr, "wind_velocity", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+  col->prop(ptr,
+            "wind_velocity",
+            UI_ITEM_NONE,
+            use_realsea ? IFACE_("Wind Speed (m/s)") : IFACE_("Wind Velocity"),
+            ICON_NONE);
+  if (use_realsea) {
+    col->label(RPT_("Wind measured at 19.5 m height"), ICON_INFO);
+  }
 
   layout.separator();
 
@@ -5329,14 +5365,19 @@ static void spectrum_panel_draw(const bContext * /*C*/, Panel *panel)
            MOD_OCEAN_SPECTRUM_JONSWAP,
            MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP))
   {
-    col.prop(ptr, "sharpen_peak_jonswap", ui::ITEM_R_SLIDER, std::nullopt, ICON_NONE);
-    col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    if (spectrum == MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP) {
+      col.prop(ptr, "realsea_peak_enhancement", ui::ITEM_R_SLIDER, IFACE_("Gamma"), ICON_NONE);
+    }
+    else {
+      col.prop(ptr, "sharpen_peak_jonswap", ui::ITEM_R_SLIDER, std::nullopt, ICON_NONE);
+    }
+    col.prop(ptr, "fetch_jonswap", UI_ITEM_NONE, IFACE_("Fetch (m)"), ICON_NONE);
   }
 
   if (ELEM(spectrum, MOD_OCEAN_SPECTRUM_REALSEA_PM, MOD_OCEAN_SPECTRUM_REALSEA_JONSWAP)) {
     col.separator();
-    col.prop(ptr, "realsea_fmin", UI_ITEM_NONE, std::nullopt, ICON_NONE);
-    col.prop(ptr, "realsea_fmax", UI_ITEM_NONE, std::nullopt, ICON_NONE);
+    col.prop(ptr, "realsea_fmin", UI_ITEM_NONE, IFACE_("Min Frequency (Hz)"), ICON_NONE);
+    col.prop(ptr, "realsea_fmax", UI_ITEM_NONE, IFACE_("Max Frequency (Hz)"), ICON_NONE);
     col.prop(ptr, "realsea_use_spread", UI_ITEM_NONE, IFACE_("Use Directional Spread"), ICON_NONE);
     ui::Layout &realsea_sub = col.column(false);
     realsea_sub.active_set(RNA_boolean_get(ptr, "realsea_use_spread"));
@@ -5425,6 +5466,10 @@ static void split_panel_draw(const bContext *C, Panel *panel)
   layout.use_property_split_set(true);
 
   camera_lod_status_draw(C, layout, static_cast<Object *>(ob_ptr.data), omd);
+  if (use_camera_lod) {
+    layout.label(RPT_("LOD reduces mesh detail"), ICON_INFO);
+    layout.label(RPT_("Dense FFT simulation still applies"), ICON_NONE);
+  }
   layout.separator();
 
   ui::Layout &col = layout.column(false);
