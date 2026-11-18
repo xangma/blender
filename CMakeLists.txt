@@ -419,6 +419,14 @@ endif()
 option(WITH_MOD_FLUID "Enable Mantaflow Fluid Simulation Framework" ON)
 option(WITH_MOD_REMESH "Enable Remesh Modifier" ON)
 option(WITH_MOD_OCEANSIM "Enable Ocean Modifier" ON)
+option(WITH_OCEAN_CUDA "Experimental CUDA dense Ocean sampling (opt-in at runtime)" OFF)
+if(WITH_OCEAN_CUDA)
+  if(NOT WITH_MOD_OCEANSIM)
+    message(FATAL_ERROR "WITH_OCEAN_CUDA requires WITH_MOD_OCEANSIM")
+  endif()
+  enable_language(CUDA)
+endif()
+
 
 # UV solvers.
 option(WITH_UV_SLIM "SLIM UV unwrapping solver" ON)

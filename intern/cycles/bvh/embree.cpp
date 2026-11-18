@@ -400,7 +400,11 @@ void BVHEmbree::set_tri_vertex_buffer(RTCGeometry geom_id, const Mesh *mesh, con
   for (int t = 0; t < num_motion_steps; ++t) {
     const packed_float3 *verts = attr_P->data_at_time_step<packed_float3>(t, num_motion_steps);
 
-    if (update) {
+    /* Attribute updates may replace the allocation even when topology is unchanged.
+     * Embree must point to the current CPU buffer before refitting. */
+    if (update && (rtc_device_is_sycl ||
+                   rtcGetGeometryBufferData(geom_id, RTC_BUFFER_TYPE_VERTEX, t) == verts))
+    {
       rtcUpdateGeometryBuffer(geom_id, RTC_BUFFER_TYPE_VERTEX, t);
     }
     else {
@@ -731,6 +735,19 @@ void BVHEmbree::refit(Progress &progress)
         Mesh *mesh = static_cast<Mesh *>(geom);
         if (mesh->num_triangles() > 0) {
           RTCGeometry geom = rtcGetGeometry(scene, geom_id);
+          const int *triangles = mesh->get_triangles().data();
+          if (!rtc_device_is_sycl &&
+              rtcGetGeometryBufferData(geom, RTC_BUFFER_TYPE_INDEX, 0) != triangles)
+          {
+            rtcSetSharedGeometryBuffer(geom,
+                                       RTC_BUFFER_TYPE_INDEX,
+                                       0,
+                                       RTC_FORMAT_UINT3,
+                                       triangles,
+                                       0,
+                                       sizeof(int) * 3,
+                                       mesh->num_triangles());
+          }
           set_tri_vertex_buffer(geom, mesh, true);
           rtcSetGeometryUserData(geom, (void *)mesh->prim_offset);
           rtcCommitGeometry(geom);

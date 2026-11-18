@@ -847,6 +847,15 @@ void ObjectManager::device_update_object_transform(UpdateObjectTransformState *s
     flag |= SD_OBJECT_CAUSTICS_RECEIVER;
   }
 
+  /* Identity mesh coordinates are already in world space. Match static BVH shading by
+   * avoiding the redundant normal normalization in the instance transform path, while
+   * retaining geometry instancing for BVH refitting. */
+  if (scene->params.background && scene->params.bvh_type == BVH_TYPE_DYNAMIC && geom->is_mesh() &&
+      !ob->use_motion() && tfm == transform_identity())
+  {
+    flag |= SD_OBJECT_TRANSFORM_APPLIED;
+  }
+
   /* Object flag. */
   if (ob->use_holdout) {
     flag |= SD_OBJECT_HOLDOUT_MASK;

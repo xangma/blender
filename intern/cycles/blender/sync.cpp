@@ -11,6 +11,8 @@
 #include "RNA_prototypes.hh"
 #include "RNA_types.hh"
 
+#include "bvh/bvh.h"
+
 #include "scene/background.h"
 #include "scene/bake.h"
 #include "scene/camera.h"
@@ -292,6 +294,55 @@ void BlenderSync::sync_recalc(blender::Depsgraph &b_depsgraph,
   }
 }
 
+static const char *offline_bvh_refit_fallback_reason(Scene &scene)
+{
+  /* The retained-BVH path is qualified for BVH2 and CPU Embree. Other backends have different
+   * shared-buffer and refit contracts and retain their existing offline policy. */
+  const BVHLayout layout = BVHParams::best_bvh_layout(
+      scene.params.bvh_layout,
+      scene.device->get_bvh_layout_mask(scene.dscene.data.kernel_features));
+  if (layout != BVH_LAYOUT_BVH2 &&
+      !(layout == BVH_LAYOUT_EMBREE && scene.device->info.type == DEVICE_CPU))
+  {
+    return "BVH backend";
+  }
+  if (scene.need_motion() != Scene::MOTION_NONE) {
+    return "motion";
+  }
+  for (Geometry *geometry : scene.geometry) {
+    if (!geometry->is_mesh()) {
+      if (geometry->geometry_type != Geometry::SUN_LIGHT) {
+        return "geometry type";
+      }
+      continue;
+    }
+    const Mesh *mesh = static_cast<const Mesh *>(geometry);
+    const Attribute *position = mesh->attributes.find(ATTR_STD_POSITION);
+    if (mesh->get_subdivision_type() != Mesh::SUBDIVISION_NONE ||
+        (position && position->has_motion()))
+    {
+      return "subdivision or motion data";
+    }
+    for (Node *node : mesh->get_used_shaders()) {
+      const Shader *shader = static_cast<const Shader *>(node);
+      if (shader->has_volume_connected || shader->has_displacement) {
+        return "volume or displacement shader";
+      }
+      for (ShaderNode *shader_node : shader->graph->nodes) {
+        if (shader_node->has_surface_emission() || shader_node->has_surface_bssrdf()) {
+          return "emissive or subsurface shader";
+        }
+      }
+    }
+  }
+  for (Object *object : scene.objects) {
+    if (object->get_geometry()->is_mesh() && object->get_tfm() != transform_identity()) {
+      return "transformed mesh";
+    }
+  }
+  return nullptr;
+}
+
 void BlenderSync::sync_data(blender::RenderData &b_render,
                             blender::Depsgraph &b_depsgraph,
                             blender::bScreen *b_screen,
@@ -342,6 +393,28 @@ void BlenderSync::sync_data(blender::RenderData &b_render,
   /* Shader sync done at the end, since object sync uses it.
    * false = don't delete unused shaders, not supported. */
   shader_map.post_sync(false);
+
+  if (scene->params.background && scene->params.bvh_type == BVH_TYPE_DYNAMIC) {
+    if (const char *reason = offline_bvh_refit_fallback_reason(*scene)) {
+      /* Rebuild the root with the static policy as well as switching geometry
+       * updates; an existing dynamic root must not keep instance references. */
+      scene->params.bvh_type = BVH_TYPE_STATIC;
+      scene->bvh.reset();
+      /* Cached attributes and object flags still describe the dynamic layout.
+       * Reallocate geometry buffers so static-transform normal writes are
+       * uploaded even when synchronization reused unchanged attributes. */
+      for (Geometry *geometry : scene->geometry) {
+        geometry->tag_modified();
+        geometry->tag_update(scene, true);
+      }
+      for (Object *object : scene->objects) {
+        object->tag_modified();
+        object->tag_update(scene);
+      }
+      scene->geometry_manager->tag_update(scene, GeometryManager::GEOMETRY_MODIFIED);
+      LOG_INFO << "Offline BVH refit fallback: " << reason;
+    }
+  }
 
   LOG_INFO << "Total time spent synchronizing data: " << timer.get_time();
 
@@ -973,7 +1046,13 @@ SceneParams BlenderSync::get_scene_params(blender::UserDef &b_preferences,
     params.shadingsystem = SHADINGSYSTEM_OSL;
   }
 
-  if (background || (use_developer_ui && get_enum(cscene, "debug_bvh_type"))) {
+  /* Persistent offline sessions can retain per-geometry BVHs and refit unchanged
+   * topology. Unsupported scenes select the static policy after synchronization. */
+  const bool dynamic_background = background &&
+                                  (b_scene.r.mode & blender::R_PERSISTENT_DATA) != 0;
+  if ((background && !dynamic_background) ||
+      (use_developer_ui && get_enum(cscene, "debug_bvh_type")))
+  {
     params.bvh_type = BVH_TYPE_STATIC;
   }
   else {

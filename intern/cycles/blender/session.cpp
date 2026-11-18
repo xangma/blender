@@ -207,8 +207,18 @@ void BlenderSession::reset_session(blender::Main &b_data, blender::Depsgraph &b_
 
   const SessionParams session_params = BlenderSync::get_session_params(
       b_engine, b_userpref, *b_scene, background, pixelsize);
-  const SceneParams scene_params = BlenderSync::get_scene_params(
+  SceneParams scene_params = BlenderSync::get_scene_params(
       b_userpref, b_data, *b_scene, background, use_developer_ui);
+
+  /* Synchronization may have selected the static fallback for this offline session.
+   * Preserve it until the session is otherwise recreated, so unsupported scenes
+   * retain their persistent data instead of restarting on every render. */
+  if (background && scene_params.bvh_type == BVH_TYPE_DYNAMIC &&
+      scene->params.bvh_type == BVH_TYPE_STATIC)
+  {
+    scene_params.bvh_type = BVH_TYPE_STATIC;
+    LOG_INFO << "Offline BVH refit fallback: retained static session";
+  }
 
   if (scene->params.modified(scene_params) || session->params.modified(session_params) ||
       (this->b_render->mode & blender::R_PERSISTENT_DATA) == 0)

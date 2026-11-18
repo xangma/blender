@@ -179,11 +179,32 @@ bool BKE_ocean_init(struct Ocean *o,
                     int seed);
 void BKE_ocean_simulate(struct Ocean *o, float t, float scale, float chop_amount);
 
+/* Dense live sampling fields, including normals and Jacobians. FFT plans and
+ * immutable spectral inputs remain owned by the destination Ocean. */
+struct OceanSamplingSnapshot;
+bool BKE_ocean_sampling_snapshot_store(const struct Ocean *o,
+                                       struct OceanSamplingSnapshot **snapshot);
+bool BKE_ocean_sampling_snapshot_restore(struct Ocean *o,
+                                         const struct OceanSamplingSnapshot *snapshot);
+void BKE_ocean_sampling_snapshot_free(struct OceanSamplingSnapshot *snapshot);
+
 float BKE_ocean_jminus_to_foam(float jminus, float coverage);
 /**
  * Sampling the ocean surface.
  */
 void BKE_ocean_eval_uv(struct Ocean *oc, struct OceanResult *ocr, float u, float v);
+/** Experimental dense CUDA sampling; false leaves all outputs untouched for CPU fallback. */
+bool BKE_ocean_sample_cuda(struct Ocean *oc,
+                           int vertex_count,
+                           float size_co_inv,
+                           float foam_coverage,
+                           bool inverse_spray,
+                           const float *reference_positions,
+                           float *positions,
+                           unsigned char *foam,
+                           float *compression,
+                           unsigned char *spray);
+
 /**
  * Use catmullrom interpolation rather than linear.
  */
@@ -229,6 +250,15 @@ bool BKE_ocean_split_runtime_sample_level(const struct Ocean *oc,
 bool BKE_ocean_split_runtime_read_begin(const struct Ocean *oc,
                                         struct OceanSplitRuntimeReadScope *r_scope);
 void BKE_ocean_split_runtime_read_end(struct OceanSplitRuntimeReadScope *scope);
+/**
+ * Sample the full spectrum while an active read scope protects the Ocean buffers.
+ * The scope must remain active until all sampling tasks have completed.
+ */
+void BKE_ocean_eval_uv_in_scope(const struct OceanSplitRuntimeReadScope *scope,
+                                struct OceanResult *ocr,
+                                float u,
+                                float v);
+
 bool BKE_ocean_split_runtime_level_get_in_scope(const struct OceanSplitRuntimeReadScope *scope,
                                                 int level_index,
                                                 struct OceanSplitRuntimeLevel *r_level);
