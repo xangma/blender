@@ -150,6 +150,9 @@ struct Ocean {
   int _split_levels_num;
   OceanSplitLevel *_split_levels;
   uint64_t _split_runtime_revision;
+  float _split_simulated_time;
+  float _split_simulated_scale;
+  float _split_simulated_chop;
 };
 #else
 /* stub */

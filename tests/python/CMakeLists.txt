@@ -702,6 +702,18 @@ if(TEST_SRC_DIR_EXISTS)
     )
 
     add_blender_test(
+      physics_ocean_camera_lod_persistent_fields
+      --python ${TEST_PYTHON_DIR}/ocean_camera_lod_persistent_fields.py
+      --
+      --outdir ${TEST_OUT_DIR}/ocean_camera_lod_persistent_fields
+      --resolution 16
+      --width 96
+      --height 64
+      --samples 2
+      --smallest-wave 0.05
+    )
+
+    add_blender_test(
       physics_ocean_lod_benchmark_report
       --python ${TEST_PYTHON_DIR}/ocean_camera_lod_benchmark.py
       --

@@ -720,7 +720,10 @@ static void ocean_split_copy_fft_output(float *dst, const double *src, const siz
   }
 }
 
-static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, const float chop_amount)
+static void ocean_split_build_spectral_pyramid(Ocean *o,
+                                               const float time,
+                                               const float scale,
+                                               const float chop_amount)
 {
   if (!o->_do_split || !o->_do_normals) {
     return;
@@ -776,6 +779,9 @@ static void ocean_split_build_spectral_pyramid(Ocean *o, const float scale, cons
     }
   }
 
+  o->_split_simulated_time = time;
+  o->_split_simulated_scale = scale;
+  o->_split_simulated_chop = chop_amount;
   o->_split_runtime_revision++;
 }
 
@@ -1951,20 +1957,23 @@ bool BKE_ocean_is_valid(const Ocean *o)
 
 void BKE_ocean_simulate(Ocean *o, float t, float scale, float chop_amount)
 {
-  TaskPool *pool;
+  BLI_rw_mutex_lock(&o->oceanmutex, THREAD_LOCK_WRITE);
+  scale *= o->normalize_factor;
+  /* A shared mesh cache hit still needs the fields from this Ocean at the requested time. */
+  if (o->_do_split && o->_split_levels_num > 0 && o->_split_simulated_time == t &&
+      o->_split_simulated_scale == scale && o->_split_simulated_chop == chop_amount)
+  {
+    BLI_rw_mutex_unlock(&o->oceanmutex);
+    return;
+  }
 
   OceanSimulateData osd;
-
-  scale *= o->normalize_factor;
-
   osd.o = o;
   osd.t = t;
   osd.scale = scale;
   osd.chop_amount = chop_amount;
 
-  pool = BLI_task_pool_create(&osd, TASK_PRIORITY_HIGH);
-
-  BLI_rw_mutex_lock(&o->oceanmutex, THREAD_LOCK_WRITE);
+  TaskPool *pool = BLI_task_pool_create(&osd, TASK_PRIORITY_HIGH);
 
   /* Note about multi-threading here: we have to run a first set of computations (htilda one)
    * before we can run all others, since they all depend on it.
@@ -2003,7 +2012,7 @@ void BKE_ocean_simulate(Ocean *o, float t, float scale, float chop_amount)
   BLI_task_pool_work_and_wait(pool);
 
   if (o->_do_split) {
-    ocean_split_build_spectral_pyramid(o, scale, chop_amount);
+    ocean_split_build_spectral_pyramid(o, t, scale, chop_amount);
   }
 
   BLI_rw_mutex_unlock(&o->oceanmutex);

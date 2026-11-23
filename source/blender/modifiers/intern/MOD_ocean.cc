@@ -2026,6 +2026,7 @@ struct OceanDenseResultKey {
 };
 
 struct OceanModifierRuntimeData {
+  std::mutex camera_lod_result_mutex;
   std::mutex dense_result_mutex;
   Mesh *dense_cached_result = nullptr;
   OceanSamplingSnapshot *dense_sampling_snapshot = nullptr;
@@ -4588,6 +4589,7 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
   Array<float> camera_lod_radii;
   OceanCameraLODSettings camera_lod_settings;
   OceanModifierRuntimeData *camera_lod_runtime_data = nullptr;
+  std::unique_lock<std::mutex> camera_lod_result_lock;
   OceanCameraLODMeshCacheKey camera_lod_cache_key{};
   bool camera_lod_cache_enabled = false;
   OceanCameraLODMeshCacheKey camera_lod_topology_cache_key{};
@@ -4607,6 +4609,8 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
 
   if (use_camera_lod && omd->geometry_mode == MOD_OCEAN_GEOM_GENERATE) {
     camera_lod_runtime_data = ocean_ensure_runtime_data(ocean_modifier_cache_owner(md, ctx));
+    camera_lod_result_lock = std::unique_lock<std::mutex>(
+        camera_lod_runtime_data->camera_lod_result_mutex);
     camera_lod_cache_enabled = ocean_camera_lod_cache_key_init(
         ctx, omd, resolution, cfra_scene, camera_lod_cache_key);
     camera_lod_topology_cache_enabled = ocean_camera_lod_topology_cache_key_init(
@@ -4617,7 +4621,14 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
           *camera_lod_runtime_data, camera_lod_cache_key, mesh);
       if (cached_result != nullptr) {
         publish_viewport_status(camera_lod_runtime_data->camera_lod_cached_status);
+        camera_lod_result_lock.unlock();
+        /* Geometry is shared across dependency graphs. Cycles reads the spectral fields
+         * from this graph's evaluated modifier, which may still hold another frame. */
+        const double simulation_start = profile_enabled ? BLI_time_now_seconds() : 0.0;
+        BKE_ocean_ensure(omd, resolution);
+        simulate_ocean_modifier(omd);
         if (profile_enabled) {
+          simulation_s = BLI_time_now_seconds() - simulation_start;
           ocean_camera_lod_profile_logf(
               object_name,
               "modifier_cache_hit",
@@ -4687,12 +4698,9 @@ static Mesh *doOcean(ModifierData *md, const ModifierEvalContext *ctx, Mesh *mes
       BKE_ocean_simulate_cache(omd->oceancache, cfra_scene);
     }
     else {
-      /* omd->ocean is nullptr on an original object (in contrast to an evaluated one).
-       * We can create a new one, but we have to free it as well once we're done.
-       * This function is only called on an original object when applying the modifier
-       * using the 'Apply Modifier' button, and thus it is not called frequently for
-       * simulation. */
-      allocated_ocean |= BKE_ocean_ensure(omd, resolution);
+      /* Apply can allocate a temporary Ocean on the original object. Camera LOD retains
+       * its evaluated Ocean so renderers can read the fields at render resolution. */
+      allocated_ocean = BKE_ocean_ensure(omd, resolution) && !use_camera_lod;
       simulate_ocean_modifier(omd);
     }
   }
